@@ -25,6 +25,7 @@ type command struct {
 func commands() []command {
 	return []command{
 		{"sensors", "list sensors from a data source", runSensors},
+		{"render", "render a test frame to a PNG", runRender},
 		{"version", "print build information", runVersion},
 	}
 }
