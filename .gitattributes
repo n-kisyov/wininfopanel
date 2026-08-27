@@ -1,2 +1,11 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Keep Go sources LF in the working tree; the toolchain is LF-native and this
+# silences CRLF conversion warnings on Windows checkouts.
+*.go text eol=lf
+*.mod text eol=lf
+*.sum text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
