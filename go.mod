@@ -5,6 +5,7 @@ go 1.26.5
 require (
 	github.com/google/uuid v1.6.0
 	github.com/shirou/gopsutil/v4 v4.26.7
+	golang.org/x/image v0.45.0
 	golang.org/x/sys v0.47.0
 )
 
@@ -16,4 +17,5 @@ require (
 	github.com/tklauser/go-sysconf v0.3.16 // indirect
 	github.com/tklauser/numcpus v0.11.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
+	golang.org/x/text v0.41.0 // indirect
 )
