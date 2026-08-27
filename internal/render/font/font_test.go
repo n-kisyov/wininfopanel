@@ -184,3 +184,56 @@ func TestCacheReturnsSameFaceForRepeatedRequests(t *testing.T) {
 		t.Error("repeated requests built separate faces; the cache is not being hit")
 	}
 }
+
+func TestEmptyFamilyResolvesToTheDefault(t *testing.T) {
+	// Display items created without an explicit font leave the family empty.
+	// A substring search would match every family here, since Contains against
+	// an empty needle is always true, and text would render in whichever
+	// family happened to sort shortest.
+	c := loadedCache(t)
+
+	key, _ := c.resolve("", Style{})
+	if key != normalizeFamily(DefaultFamily) {
+		t.Errorf("empty family resolved to %q, want %q", key, DefaultFamily)
+	}
+
+	face, err := c.Face("", Style{}, 20)
+	if err != nil {
+		t.Fatalf("Face on an empty family: %v", err)
+	}
+	if face == nil {
+		t.Fatal("Face returned nil for an empty family")
+	}
+}
+
+func TestWhitespaceFamilyResolvesToTheDefault(t *testing.T) {
+	c := loadedCache(t)
+	if key, _ := c.resolve("   ", Style{}); key != normalizeFamily(DefaultFamily) {
+		t.Errorf("whitespace family resolved to %q, want %q", key, DefaultFamily)
+	}
+}
+
+func TestFindRelatedPrefersTheShortestMatch(t *testing.T) {
+	// "Segoe UI" must win over "Segoe UI Symbol" when the request is the
+	// shorter name.
+	c := loadedCache(t)
+	if !c.Has("Segoe UI") {
+		t.Skip("Segoe UI is not installed on this machine")
+	}
+
+	key, _ := c.resolve("Segoe UI", Style{})
+	if key != "segoe ui" {
+		t.Errorf("resolved to %q, want the exact family", key)
+	}
+}
+
+// loadedCache returns a cache with the font index already built, since resolve
+// reads the index directly and does not trigger the lazy load itself.
+func loadedCache(t *testing.T) *Cache {
+	t.Helper()
+	c := NewCache()
+	if _, err := c.Families(); err != nil {
+		t.Fatalf("Families: %v", err)
+	}
+	return c
+}

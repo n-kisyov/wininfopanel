@@ -229,9 +229,20 @@ func (c *Cache) resolve(family string, style Style) (string, Style) {
 	defer c.mu.RUnlock()
 
 	name := normalizeFamily(family)
-	fam, ok := c.families[name]
-	if !ok {
-		fam, ok = c.findRelatedLocked(name)
+
+	// An unset family goes straight to the fallback. Without this the
+	// substring search below would match every family -- strings.Contains
+	// against an empty needle is always true -- and text would render in
+	// whichever family happened to have the shortest name.
+	var (
+		fam *Family
+		ok  bool
+	)
+	if name != "" {
+		fam, ok = c.families[name]
+		if !ok {
+			fam, ok = c.findRelatedLocked(name)
+		}
 	}
 	if !ok {
 		fam, ok = c.families[normalizeFamily(c.fallback)]
@@ -248,6 +259,10 @@ func (c *Cache) resolve(family string, style Style) (string, Style) {
 // findRelatedLocked looks for a family whose name contains the request, or is
 // contained by it. Caller holds c.mu.
 func (c *Cache) findRelatedLocked(name string) (*Family, bool) {
+	if name == "" {
+		return nil, false
+	}
+
 	var best *Family
 	for candidate, fam := range c.families {
 		if !strings.Contains(candidate, name) && !strings.Contains(name, candidate) {
