@@ -35,6 +35,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	// rather than a suffix on {id}.
 	mux.HandleFunc("GET /panel/{id}/image.png", s.handlePanelImage)
 
+	s.writeRoutes(mux)
+
 	mux.HandleFunc("GET /", s.handleIndex)
 }
 

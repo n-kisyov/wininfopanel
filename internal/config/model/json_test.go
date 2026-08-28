@@ -122,24 +122,70 @@ func TestMarshalItemEmitsKindDiscriminator(t *testing.T) {
 	}
 }
 
-func TestCloneAssignsFreshIDsThroughout(t *testing.T) {
+func TestClonePreservesIdentity(t *testing.T) {
+	// Reading a layout hands out clones. An ID that changed on the way out
+	// would make every ID-addressed operation miss its target.
 	group := NewGroupItem("Cluster")
 	child := NewTextItem("Inner")
 	group.Add(child)
 
 	clone := group.Clone().(*GroupItem)
 
-	if clone.ID == group.ID {
-		t.Error("clone reused the group's ID")
+	if clone.ID != group.ID {
+		t.Error("clone changed the group's id")
 	}
 	if len(clone.Items) != 1 {
 		t.Fatalf("clone has %d children, want 1", len(clone.Items))
 	}
-	if clone.Items[0].Base().ID == child.ID {
-		t.Error("clone reused the child's ID")
+	if clone.Items[0].Base().ID != child.ID {
+		t.Error("clone changed the child's id")
 	}
 	if clone.Items[0].Base().Name != "Inner" {
 		t.Error("clone lost the child's name")
+	}
+}
+
+func TestCloneIsDeep(t *testing.T) {
+	group := NewGroupItem("Cluster")
+	group.Add(NewTextItem("Inner"))
+
+	clone := group.Clone().(*GroupItem)
+	clone.Items[0].Base().Name = "Changed"
+
+	if group.Items[0].Base().Name != "Inner" {
+		t.Error("editing a clone's child changed the original: the copy is shallow")
+	}
+}
+
+func TestDuplicateAssignsFreshIDsThroughout(t *testing.T) {
+	// Duplicating is the other operation: a genuinely new item, so that edits
+	// to it cannot reach the one it was copied from.
+	group := NewGroupItem("Cluster")
+	child := NewTextItem("Inner")
+	group.Add(child)
+
+	copied := Duplicate(group).(*GroupItem)
+
+	if copied.ID == group.ID {
+		t.Error("duplicate reused the group's id")
+	}
+	if copied.Items[0].Base().ID == child.ID {
+		t.Error("duplicate reused the child's id")
+	}
+	if copied.Items[0].Base().Name != "Inner" {
+		t.Error("duplicate lost the child's name")
+	}
+}
+
+func TestDuplicateReidentifiesGaugeFrames(t *testing.T) {
+	gauge := NewGaugeItem("Fan")
+	gauge.Images = []*ImageItem{NewImageItem("frame0")}
+	originalFrameID := gauge.Images[0].ID
+
+	copied := Duplicate(gauge).(*GaugeItem)
+
+	if copied.Images[0].ID == originalFrameID {
+		t.Error("duplicate reused a gauge frame's id")
 	}
 }
 

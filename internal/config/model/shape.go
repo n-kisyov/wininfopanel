@@ -90,7 +90,6 @@ func (s *ShapeItem) Kind() ItemKind { return KindShape }
 // Clone implements DisplayItem.
 func (s *ShapeItem) Clone() DisplayItem {
 	c := *s
-	c.reidentify()
 	return &c
 }
 

@@ -92,7 +92,6 @@ func (g *GraphItem) Kind() ItemKind { return KindGraph }
 // Clone implements DisplayItem.
 func (g *GraphItem) Clone() DisplayItem {
 	c := *g
-	c.reidentify()
 	return &c
 }
 
@@ -142,7 +141,6 @@ func (b *BarItem) Kind() ItemKind { return KindBar }
 // Clone implements DisplayItem.
 func (b *BarItem) Clone() DisplayItem {
 	c := *b
-	c.reidentify()
 	return &c
 }
 
@@ -186,7 +184,6 @@ func (d *DonutItem) Kind() ItemKind { return KindDonut }
 // Clone implements DisplayItem.
 func (d *DonutItem) Clone() DisplayItem {
 	c := *d
-	c.reidentify()
 	return &c
 }
 

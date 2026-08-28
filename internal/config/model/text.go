@@ -122,7 +122,6 @@ func (t *TextItem) Kind() ItemKind { return KindText }
 // Clone implements DisplayItem.
 func (t *TextItem) Clone() DisplayItem {
 	c := *t
-	c.reidentify()
 	return &c
 }
 
@@ -160,7 +159,6 @@ func (c *ClockItem) Kind() ItemKind { return KindClock }
 // Clone implements DisplayItem.
 func (c *ClockItem) Clone() DisplayItem {
 	cp := *c
-	cp.reidentify()
 	return &cp
 }
 
@@ -198,7 +196,6 @@ func (c *CalendarItem) Kind() ItemKind { return KindCalendar }
 // Clone implements DisplayItem.
 func (c *CalendarItem) Clone() DisplayItem {
 	cp := *c
-	cp.reidentify()
 	return &cp
 }
 

@@ -378,13 +378,13 @@ func (s *Service) DuplicateProfile(id string) (*model.Profile, error) {
 		return nil, err
 	}
 
-	// The layout is copied with fresh item IDs so edits to one profile cannot
-	// reach the other.
+	// The layout is duplicated rather than cloned, so the copy's items carry
+	// fresh IDs and edits to one profile cannot reach the other.
 	items, err := s.store.Layout(id)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.store.SetLayout(clone.ID, model.CloneAll(items)); err != nil {
+	if err := s.store.SetLayout(clone.ID, model.DuplicateAll(items)); err != nil {
 		return nil, err
 	}
 

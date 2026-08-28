@@ -40,7 +40,11 @@ type DisplayItem interface {
 	Base() *ItemBase
 	// Kind reports the item's type discriminator.
 	Kind() ItemKind
-	// Clone returns a deep copy carrying a fresh ID.
+	// Clone returns a faithful deep copy, identity included.
+	//
+	// It is a copy of the same item, not a new one: reading a layout hands out
+	// clones, and an ID that changed on the way out would make every
+	// ID-addressed operation miss. Use Duplicate to make a genuinely new item.
 	Clone() DisplayItem
 	// Bounds returns the item's extent in profile coordinates, before the
 	// item's own rotation is applied.
@@ -84,7 +88,7 @@ func newItemBase(name string) ItemBase {
 	return ItemBase{ID: uuid.NewString(), Name: name, X: 100, Y: 100}
 }
 
-// reidentify assigns a fresh ID, called when cloning.
+// reidentify assigns a fresh ID, used when duplicating.
 func (b *ItemBase) reidentify() { b.ID = uuid.NewString() }
 
 // TextSpec describes a run of text well enough to measure or draw it.
@@ -221,7 +225,7 @@ func FindByID(items []DisplayItem, id string) (DisplayItem, bool) {
 	return nil, false
 }
 
-// CloneAll deep-copies a layout, assigning fresh IDs throughout.
+// CloneAll deep-copies a layout, preserving every item's identity.
 func CloneAll(items []DisplayItem) []DisplayItem {
 	if items == nil {
 		return nil
@@ -231,4 +235,43 @@ func CloneAll(items []DisplayItem) []DisplayItem {
 		out[i] = item.Clone()
 	}
 	return out
+}
+
+// Duplicate returns a copy of an item as a genuinely new one, with a fresh ID
+// throughout its tree.
+//
+// This is what "duplicate this item" means, as distinct from Clone, which
+// hands out a faithful copy of the same item.
+func Duplicate(item DisplayItem) DisplayItem {
+	copied := item.Clone()
+	reidentifyTree(copied)
+	return copied
+}
+
+// DuplicateAll duplicates a whole layout.
+func DuplicateAll(items []DisplayItem) []DisplayItem {
+	if items == nil {
+		return nil
+	}
+	out := make([]DisplayItem, len(items))
+	for i, item := range items {
+		out[i] = Duplicate(item)
+	}
+	return out
+}
+
+// reidentifyTree assigns fresh IDs to an item and everything beneath it.
+func reidentifyTree(item DisplayItem) {
+	item.Base().reidentify()
+
+	switch it := item.(type) {
+	case *GroupItem:
+		for _, child := range it.Items {
+			reidentifyTree(child)
+		}
+	case *GaugeItem:
+		for _, frame := range it.Images {
+			frame.reidentify()
+		}
+	}
 }
