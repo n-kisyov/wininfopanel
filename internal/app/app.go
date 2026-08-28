@@ -242,16 +242,30 @@ func (a *App) persistPosition(profileID string, x, y int) {
 
 // EnsureDefaultProfile creates a starter profile when none exists, so a first
 // run has something to show rather than an empty screen.
+//
+// The profile is assembled complete -- background and starter items -- and only
+// then announced, so its overlay never appears in the half-built state a bare
+// NewProfile leaves it in: empty, and opaque white. That is why this goes
+// through the store rather than the API's CreateProfile, which publishes the
+// profile the moment it exists.
 func (a *App) EnsureDefaultProfile() (*model.Profile, error) {
 	if profiles := a.Store.Profiles(); len(profiles) > 0 {
 		return profiles[0], nil
 	}
 
-	profile, err := a.API.CreateProfile("Default", 800, 480)
-	if err != nil {
-		return nil, err
+	profile := model.NewProfile("Default", 800, 480)
+	profile.BackgroundColor = starterBackground
+
+	if err := a.Store.AddProfile(profile); err != nil {
+		return nil, fmt.Errorf("create the default profile: %w", err)
 	}
-	a.log.Info("created the default profile", "id", profile.ID)
+	items := starterLayout()
+	if err := a.Store.SetLayout(profile.ID, items); err != nil {
+		return nil, fmt.Errorf("seed the default profile: %w", err)
+	}
+	a.syncDisplays()
+
+	a.log.Info("created the default profile", "id", profile.ID, "items", len(items))
 	return profile, nil
 }
 
