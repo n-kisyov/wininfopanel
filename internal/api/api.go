@@ -8,6 +8,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -16,11 +17,13 @@ import (
 	"github.com/n-kisyov/wininfopanel/internal/config/model"
 	"github.com/n-kisyov/wininfopanel/internal/config/store"
 	"github.com/n-kisyov/wininfopanel/internal/logging"
+	"github.com/n-kisyov/wininfopanel/internal/plugins"
 	"github.com/n-kisyov/wininfopanel/internal/render/font"
 	"github.com/n-kisyov/wininfopanel/internal/sensor"
 	"github.com/n-kisyov/wininfopanel/internal/sensor/hwinfo"
 	"github.com/n-kisyov/wininfopanel/internal/sensor/native"
 	"github.com/n-kisyov/wininfopanel/internal/winapi"
+	"github.com/n-kisyov/wininfopanel/pkg/plugin"
 )
 
 // Service implements the application surface.
@@ -34,7 +37,8 @@ type Service struct {
 	hwinfo *hwinfo.Reader
 	native *native.Monitor
 
-	fonts *font.Cache
+	fonts   *font.Cache
+	plugins *plugins.Manager
 
 	// onProfilesChanged lets the display manager re-sync when profiles change.
 	onProfilesChanged func()
@@ -42,11 +46,12 @@ type Service struct {
 
 // Options configures a Service.
 type Options struct {
-	Store  *store.Store
-	Undo   *store.UndoManager
-	HWiNFO *hwinfo.Reader
-	Native *native.Monitor
-	Fonts  *font.Cache
+	Store   *store.Store
+	Undo    *store.UndoManager
+	HWiNFO  *hwinfo.Reader
+	Native  *native.Monitor
+	Plugins *plugins.Manager
+	Fonts   *font.Cache
 
 	// OnProfilesChanged fires after any change that could alter which
 	// overlays should be showing.
@@ -67,6 +72,7 @@ func New(opts Options) *Service {
 		hwinfo:            opts.HWiNFO,
 		native:            opts.Native,
 		fonts:             opts.Fonts,
+		plugins:           opts.Plugins,
 		onProfilesChanged: opts.OnProfilesChanged,
 	}
 }
@@ -152,6 +158,19 @@ func (s *Service) sourceStatuses() []SourceStatus {
 		})
 	}
 
+	if s.plugins != nil {
+		status := SourceStatus{
+			Source:      sensor.SourcePlugin,
+			Name:        "Plugins",
+			Available:   s.plugins.Available(),
+			SensorCount: len(s.plugins.Entries()),
+		}
+		if !status.Available {
+			status.Detail = "No plugin is publishing values"
+		}
+		out = append(out, status)
+	}
+
 	return out
 }
 
@@ -219,9 +238,69 @@ func (s *Service) Sensors(source sensor.Source) ([]SensorNode, error) {
 		}
 		return groupSensors(grouped), nil
 
+	case sensor.SourcePlugin:
+		if s.plugins == nil {
+			return nil, fmt.Errorf("the plugin system is not enabled")
+		}
+		entries := s.plugins.Entries()
+		grouped := make([]groupedEntry, 0, len(entries))
+		for _, e := range entries {
+			grouped = append(grouped, groupedEntry{
+				// Plugin entries are grouped by plugin and container together,
+				// so two plugins with a container of the same name stay apart.
+				group: e.PluginName + " / " + e.Container,
+				entry: SensorEntry{
+					Key:  sensor.Key{Source: sensor.SourcePlugin, Path: e.Path},
+					Name: e.Name, Type: string(e.Type), Unit: e.Unit,
+					Value: e.Value, Min: e.Min, Max: e.Max, Avg: e.Avg, Text: e.Text,
+				},
+			})
+		}
+		return groupSensors(grouped), nil
+
 	default:
 		return nil, fmt.Errorf("unknown sensor source %q", source)
 	}
+}
+
+// PluginStatuses describes every discovered plugin, for the Plugins page.
+func (s *Service) PluginStatuses() []plugins.Status {
+	if s.plugins == nil {
+		return nil
+	}
+	return s.plugins.Statuses()
+}
+
+// InvokePluginAction runs one of a plugin's actions.
+func (s *Service) InvokePluginAction(ctx context.Context, pluginName, action string) error {
+	if s.plugins == nil {
+		return fmt.Errorf("the plugin system is not enabled")
+	}
+	return s.plugins.Invoke(ctx, pluginName, action)
+}
+
+// PluginConfig reads a plugin's settings.
+func (s *Service) PluginConfig(ctx context.Context, pluginName string) ([]plugin.ConfigProperty, error) {
+	if s.plugins == nil {
+		return nil, fmt.Errorf("the plugin system is not enabled")
+	}
+	return s.plugins.Config(ctx, pluginName)
+}
+
+// SetPluginConfig applies and persists one of a plugin's settings.
+func (s *Service) SetPluginConfig(ctx context.Context, pluginName, key string, value any) error {
+	if s.plugins == nil {
+		return fmt.Errorf("the plugin system is not enabled")
+	}
+	return s.plugins.SetConfig(ctx, pluginName, key, value)
+}
+
+// SetPluginEnabled turns a plugin on or off.
+func (s *Service) SetPluginEnabled(pluginName string, enabled bool) error {
+	if s.plugins == nil {
+		return fmt.Errorf("the plugin system is not enabled")
+	}
+	return s.plugins.SetEnabled(pluginName, enabled)
 }
 
 // groupedEntry pairs a sensor with the tree section it belongs under.
@@ -299,13 +378,13 @@ func (s *Service) DuplicateProfile(id string) (*model.Profile, error) {
 		return nil, err
 	}
 
-	// The layout is copied with fresh item IDs so edits to one profile cannot
-	// reach the other.
+	// The layout is duplicated rather than cloned, so the copy's items carry
+	// fresh IDs and edits to one profile cannot reach the other.
 	items, err := s.store.Layout(id)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.store.SetLayout(clone.ID, model.CloneAll(items)); err != nil {
+	if err := s.store.SetLayout(clone.ID, model.DuplicateAll(items)); err != nil {
 		return nil, err
 	}
 

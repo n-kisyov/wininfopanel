@@ -28,6 +28,8 @@ func commands() []command {
 		{"render", "render a graphics test frame to a PNG", runRender},
 		{"panel", "render a profile layout to a PNG using live sensors", runPanel},
 		{"overlay", "show a live desktop overlay window", runOverlay},
+		{"import", "import profiles from an existing InfoPanel installation", runImport},
+		{"usb", "list USB devices, identify LCD panels, or stream a test pattern", runUSB},
 		{"version", "print build information", runVersion},
 	}
 }

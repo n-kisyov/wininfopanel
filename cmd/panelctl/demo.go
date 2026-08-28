@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/n-kisyov/wininfopanel/internal/config/model"
+	"github.com/n-kisyov/wininfopanel/internal/config/store"
 	"github.com/n-kisyov/wininfopanel/internal/render/draw"
 	"github.com/n-kisyov/wininfopanel/internal/render/font"
 	"github.com/n-kisyov/wininfopanel/internal/render/graphics"
@@ -24,6 +25,8 @@ func runPanel(ctx context.Context, args []string) error {
 	fs := newFlagSet("panel")
 	out := fs.String("out", "panel.png", "PNG file to write")
 	profilePath := fs.String("profile", "", "profile layout JSON to render; omitted renders a built-in demo")
+	dataDir := fs.String("data-dir", "", "render a stored profile from this data directory")
+	profileID := fs.String("profile-id", "", "profile to render from -data-dir; omitted renders the first")
 	width := fs.Int("width", 800, "canvas width when using the demo layout")
 	height := fs.Int("height", 480, "canvas height when using the demo layout")
 	live := fs.Bool("live", true, "resolve sensors from the native monitor")
@@ -35,7 +38,7 @@ func runPanel(ctx context.Context, args []string) error {
 	}
 	setupConsoleLogging(*verbose)
 
-	profile, items, err := loadLayout(*profilePath, *width, *height)
+	profile, items, images, err := loadRenderable(*dataDir, *profileID, *profilePath, *width, *height)
 	if err != nil {
 		return err
 	}
@@ -73,7 +76,7 @@ func runPanel(ctx context.Context, args []string) error {
 		Profile:        profile,
 		Sensors:        resolver,
 		History:        history,
-		Images:         media.NewLoader(media.Options{}),
+		Images:         images,
 		Smoothing:      draw.NewSmoother(0), // no easing: a still frame has nowhere to ease from
 		Design:         *design,
 		GridSpacing:    20,
@@ -82,6 +85,46 @@ func runPanel(ctx context.Context, args []string) error {
 	})
 
 	return writePNG(*out, g)
+}
+
+// loadRenderable resolves what to render and how to find its images.
+//
+// A stored profile is loaded through the config store so relative image paths
+// resolve against its asset directory; a bare layout file has no profile to
+// resolve against, so only absolute paths work there.
+func loadRenderable(dataDir, profileID, profilePath string, width, height int) (
+	*model.Profile, model.ItemList, *media.Loader, error) {
+
+	if dataDir == "" {
+		profile, items, err := loadLayout(profilePath, width, height)
+		return profile, items, media.NewLoader(media.Options{}), err
+	}
+
+	configStore, err := store.Open(dataDir)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	profiles := configStore.Profiles()
+	if len(profiles) == 0 {
+		return nil, nil, nil, fmt.Errorf("no profiles in %s", dataDir)
+	}
+
+	profile := profiles[0]
+	if profileID != "" {
+		found, ok := configStore.Profile(profileID)
+		if !ok {
+			return nil, nil, nil, fmt.Errorf("profile %s not found in %s", profileID, dataDir)
+		}
+		profile = found
+	}
+
+	items, err := configStore.Layout(profile.ID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	return profile, items, media.NewLoader(media.Options{AssetRoot: configStore.AssetsDir}), nil
 }
 
 // loadLayout reads a profile layout from disk, or builds the demo one.

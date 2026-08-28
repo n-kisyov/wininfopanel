@@ -55,7 +55,6 @@ func (s *SensorItem) Kind() ItemKind { return KindSensor }
 // Clone implements DisplayItem.
 func (s *SensorItem) Clone() DisplayItem {
 	c := *s
-	c.reidentify()
 	return &c
 }
 
@@ -156,7 +155,6 @@ func (t *TableItem) Kind() ItemKind { return KindTable }
 // Clone implements DisplayItem.
 func (t *TableItem) Clone() DisplayItem {
 	c := *t
-	c.reidentify()
 	return &c
 }
 

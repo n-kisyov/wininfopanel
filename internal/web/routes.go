@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/n-kisyov/wininfopanel/internal/config/model"
+	"github.com/n-kisyov/wininfopanel/internal/plugins"
 	"github.com/n-kisyov/wininfopanel/internal/render/draw"
 	"github.com/n-kisyov/wininfopanel/internal/render/graphics"
 	"github.com/n-kisyov/wininfopanel/internal/sensor"
@@ -27,11 +28,14 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/sensors/{source}", s.handleSensors)
 	mux.HandleFunc("GET /api/screens", s.handleScreens)
 	mux.HandleFunc("GET /api/fonts", s.handleFonts)
+	mux.HandleFunc("GET /api/plugins", s.handlePlugins)
 
 	// Rendered frames, the reason to open this from another device. A wildcard
 	// must span a whole path segment, so the extension is its own segment
 	// rather than a suffix on {id}.
 	mux.HandleFunc("GET /panel/{id}/image.png", s.handlePanelImage)
+
+	s.writeRoutes(mux)
 
 	mux.HandleFunc("GET /", s.handleIndex)
 }
@@ -107,6 +111,15 @@ func (s *Server) handleFonts(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, families)
+}
+
+func (s *Server) handlePlugins(w http.ResponseWriter, _ *http.Request) {
+	// An empty list rather than null, so the page can iterate without a guard.
+	statuses := s.opts.API.PluginStatuses()
+	if statuses == nil {
+		statuses = []plugins.Status{}
+	}
+	s.writeJSON(w, http.StatusOK, statuses)
 }
 
 // handlePanelImage renders a profile and returns it as a PNG.

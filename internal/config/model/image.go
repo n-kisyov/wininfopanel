@@ -73,7 +73,6 @@ func (i *ImageItem) Kind() ItemKind { return KindImage }
 // Clone implements DisplayItem.
 func (i *ImageItem) Clone() DisplayItem {
 	c := *i
-	c.reidentify()
 	return &c
 }
 
@@ -122,7 +121,6 @@ func (h *HTTPImageItem) Kind() ItemKind { return KindHTTPImage }
 // Clone implements DisplayItem.
 func (h *HTTPImageItem) Clone() DisplayItem {
 	c := *h
-	c.reidentify()
 	return &c
 }
 
@@ -147,7 +145,6 @@ func (s *SensorImageItem) Kind() ItemKind { return KindSensorImage }
 // Clone implements DisplayItem.
 func (s *SensorImageItem) Clone() DisplayItem {
 	c := *s
-	c.reidentify()
 	return &c
 }
 
@@ -193,7 +190,6 @@ func (g *GaugeItem) Kind() ItemKind { return KindGauge }
 // Clone implements DisplayItem.
 func (g *GaugeItem) Clone() DisplayItem {
 	c := *g
-	c.reidentify()
 	c.Images = make([]*ImageItem, len(g.Images))
 	for i, img := range g.Images {
 		c.Images[i] = img.Clone().(*ImageItem)

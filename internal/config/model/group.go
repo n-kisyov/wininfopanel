@@ -21,7 +21,6 @@ func (g *GroupItem) Kind() ItemKind { return KindGroup }
 // Clone implements DisplayItem.
 func (g *GroupItem) Clone() DisplayItem {
 	c := *g
-	c.reidentify()
 	c.Items = CloneAll(g.Items)
 	return &c
 }
