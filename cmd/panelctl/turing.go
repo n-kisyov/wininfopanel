@@ -63,15 +63,14 @@ func turingList() error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "PORT\tVID:PID\tREPORTED\tSERIAL\tREVISION\tDRIVABLE")
+	fmt.Fprintln(w, "PORT\tVID:PID\tMODEL\tSERIAL\tDRIVABLE")
 	for _, c := range candidates {
 		drivable := "no"
 		if c.Supported {
 			drivable = "yes"
 		}
-		fmt.Fprintf(w, "%s\t%04X:%04X\t%s\t%s\t%s\t%s\n",
-			c.PortName, c.VendorID, c.ProductID, c.BusDescription,
-			orDash(c.Serial), c.Revision, drivable)
+		fmt.Fprintf(w, "%s\t%04X:%04X\t%s\t%s\t%s\n",
+			c.PortName, c.VendorID, c.ProductID, c.Detail, orDash(c.Serial), drivable)
 	}
 	fmt.Fprintf(w, "\n%d panel(s)\n", len(candidates))
 	if err := w.Flush(); err != nil {
@@ -109,10 +108,12 @@ func turingInfo(args []string) error {
 	}
 	defer device.Close()
 
+	model := device.Model()
 	fmt.Printf("port:       %s\n", device.Port())
+	fmt.Printf("model:      %s\n", model.Name)
 	fmt.Printf("firmware:   %s\n", device.Firmware())
-	fmt.Printf("resolution: %dx%d\n", turing.Width, turing.Height)
-	fmt.Printf("frame:      %d bytes\n", turing.FrameSize)
+	fmt.Printf("resolution: %dx%d\n", model.Width, model.Height)
+	fmt.Printf("frame:      %d bytes\n", model.FrameSize())
 	return nil
 }
 
@@ -190,11 +191,6 @@ func turingShow(ctx context.Context, args []string) error {
 		return err
 	}
 
-	profile, items, images, err := loadRenderable(*dataDir, *profileID, *profilePath, turing.Width, turing.Height)
-	if err != nil {
-		return err
-	}
-
 	// Live sensors, so the panel shows something that moves rather than a
 	// frame of dashes.
 	monitor := native.New(native.Options{Interval: 500 * time.Millisecond, StorageEnabled: true})
@@ -212,8 +208,17 @@ func turingShow(ctx context.Context, args []string) error {
 		return err
 	}
 	defer device.Close()
+	model := device.Model()
 
-	fmt.Printf("rendering %q to %s (%s)\n", profile.Name, device.Port(), device.Firmware())
+	// The layout is loaded at the panel's size, which is only known once the
+	// panel has been identified.
+	profile, items, images, err := loadRenderable(*dataDir, *profileID, *profilePath, model.Width, model.Height)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("rendering %q to %s on %s (%s)\n",
+		profile.Name, device.Port(), model.Name, device.Firmware())
 
 	surface := graphics.New(profile.Width, profile.Height, graphics.Options{
 		Fonts:     font.NewCache(),
@@ -221,8 +226,8 @@ func turingShow(ctx context.Context, args []string) error {
 	})
 	// The panel takes one exact size, so a layout of any other shape is
 	// composited onto a panel-sized canvas rather than refused.
-	canvas := image.NewRGBA(image.Rect(0, 0, turing.Width, turing.Height))
-	frame := make([]byte, turing.FrameSize)
+	canvas := image.NewRGBA(image.Rect(0, 0, model.Width, model.Height))
+	frame := make([]byte, model.FrameSize())
 
 	send := func() error {
 		renderdraw.Render(surface, items, renderdraw.Frame{
@@ -235,7 +240,7 @@ func turingShow(ctx context.Context, args []string) error {
 		draw.Draw(canvas, canvas.Bounds(), image.NewUniform(image.Black), image.Point{}, draw.Src)
 		draw.Draw(canvas, surface.Image().Bounds(), surface.Image(), image.Point{}, draw.Over)
 
-		turing.EncodeRGBA(frame, canvas)
+		turing.EncodeRGBA(frame, canvas, model)
 		return device.DisplayFrame(frame)
 	}
 

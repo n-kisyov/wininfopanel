@@ -121,29 +121,29 @@ func TestBlockWriterFlushOnEmptyWritesNothing(t *testing.T) {
 	}
 }
 
-func TestHelloRejectsAnotherRevision(t *testing.T) {
+func TestHelloRejectsAPanelOfAnotherSize(t *testing.T) {
 	panel := &fakePanel{}
-	panel.respondWith("chs_35inch_v2")
+	panel.respondWith("chs_2inch.dev1_rom1.88")
 
-	device := newDevice(panel)
+	device := newDevice(panel, Model5Inch)
 	err := device.hello()
 	if err == nil {
 		t.Fatal("hello accepted a panel that is not revision C")
 	}
-	if !strings.Contains(err.Error(), "chs_35inch_v2") {
+	if !strings.Contains(err.Error(), "chs_2inch") {
 		t.Errorf("error does not report what the panel answered: %v", err)
 	}
 }
 
 func TestHelloAcceptsRevisionC(t *testing.T) {
 	panel := &fakePanel{}
-	panel.respondWith("chs_5inch_v1.2.3")
+	panel.respondWith("chs_5inch.dev1_rom1.88")
 
-	device := newDevice(panel)
+	device := newDevice(panel, Model5Inch)
 	if err := device.hello(); err != nil {
 		t.Fatalf("hello: %v", err)
 	}
-	if device.Firmware() != "chs_5inch_v1.2.3" {
+	if device.Firmware() != "chs_5inch.dev1_rom1.88" {
 		t.Errorf("Firmware() = %q, want the handshake reply", device.Firmware())
 	}
 
@@ -158,9 +158,9 @@ func TestHelloAcceptsRevisionC(t *testing.T) {
 
 func TestSendFrameIsAWholeNumberOfBlocks(t *testing.T) {
 	panel := &fakePanel{}
-	device := newDevice(panel)
+	device := newDevice(panel, Model5Inch)
 
-	if err := device.sendFrame(make([]byte, FrameSize)); err != nil {
+	if err := device.sendFrame(make([]byte, Model5Inch.FrameSize())); err != nil {
 		t.Fatalf("sendFrame: %v", err)
 	}
 
@@ -177,13 +177,13 @@ func TestSendFrameIsAWholeNumberOfBlocks(t *testing.T) {
 	}
 
 	// The display command follows it.
-	if !bytes.HasPrefix(panel.written.Bytes()[blockSize:], cmdDisplayBitmap) {
+	if !bytes.HasPrefix(panel.written.Bytes()[blockSize:], Model5Inch.displayBitmapCommand()) {
 		t.Error("the display command does not follow the opening block")
 	}
 }
 
 func TestDisplayImageRejectsTheWrongSize(t *testing.T) {
-	device := newDevice(&fakePanel{})
+	device := newDevice(&fakePanel{}, Model5Inch)
 
 	err := device.DisplayImage(image.NewRGBA(image.Rect(0, 0, 320, 240)))
 	if err == nil {
@@ -195,15 +195,15 @@ func TestDisplayImageRejectsTheWrongSize(t *testing.T) {
 }
 
 func TestEncodeRGBAProducesOpaqueBGRA(t *testing.T) {
-	img := image.NewRGBA(image.Rect(0, 0, Width, Height))
+	img := image.NewRGBA(image.Rect(0, 0, Model5Inch.Width, Model5Inch.Height))
 
 	// A transparent pixel must still reach the panel opaque: it composites
 	// nothing, so the overlay's alpha would only darken the frame.
 	img.SetRGBA(0, 0, color.RGBA{R: 0x10, G: 0x20, B: 0x30, A: 0x00})
 	img.SetRGBA(1, 0, color.RGBA{R: 0xFF, G: 0x00, B: 0x00, A: 0xFF})
 
-	frame := make([]byte, FrameSize)
-	EncodeRGBA(frame, img)
+	frame := make([]byte, Model5Inch.FrameSize())
+	EncodeRGBA(frame, img, Model5Inch)
 
 	if got := frame[0:4]; !bytes.Equal(got, []byte{0x30, 0x20, 0x10, 0xff}) {
 		t.Errorf("pixel 0 = %#x, want B,G,R,255 = 30 20 10 ff", got)
@@ -214,15 +214,15 @@ func TestEncodeRGBAProducesOpaqueBGRA(t *testing.T) {
 }
 
 func TestEncodeRGBACoversEveryPixel(t *testing.T) {
-	img := image.NewRGBA(image.Rect(0, 0, Width, Height))
-	for y := 0; y < Height; y++ {
-		for x := 0; x < Width; x++ {
+	img := image.NewRGBA(image.Rect(0, 0, Model5Inch.Width, Model5Inch.Height))
+	for y := 0; y < Model5Inch.Height; y++ {
+		for x := 0; x < Model5Inch.Width; x++ {
 			img.SetRGBA(x, y, color.RGBA{R: 1, G: 2, B: 3, A: 255})
 		}
 	}
 
-	frame := make([]byte, FrameSize)
-	EncodeRGBA(frame, img)
+	frame := make([]byte, Model5Inch.FrameSize())
+	EncodeRGBA(frame, img, Model5Inch)
 
 	// A stride bug shows up as untouched bytes at the end of each row.
 	for i := 0; i < len(frame); i += bytesPerPixel {
@@ -232,53 +232,57 @@ func TestEncodeRGBACoversEveryPixel(t *testing.T) {
 	}
 }
 
-func TestIdentifySeparatesTheRevisions(t *testing.T) {
-	revision, supported := identify(deviceInfo(vendorTI, productRevC, "UsbMonitor"))
-	if revision != RevisionC || !supported {
-		t.Errorf("revision C = (%q, %v), want (%q, true)", revision, supported, RevisionC)
+func TestIdentifyRecognisesTheRealPanels(t *testing.T) {
+	// The 5-inch panel this was developed against. It enumerates as a generic
+	// Linux gadget serial device, so only the identifiers name it.
+	candidate, ok := identify(deviceInfo(0x1D6B, 0x0106))
+	if !ok || !candidate.Supported {
+		t.Fatalf("the 5-inch panel was not recognised: ok=%v supported=%v", ok, candidate.Supported)
+	}
+	if candidate.Model.Width != 800 || candidate.Model.Height != 480 {
+		t.Errorf("5-inch model is %dx%d, want 800x480", candidate.Model.Width, candidate.Model.Height)
 	}
 
-	// The QinHeng variant must be recognised and refused, not driven blind: it
-	// accepts every write and answers nothing.
-	revision, supported = identify(deviceInfo(vendorQinHeng, productQinHeng, "UsbMonitor"))
-	if revision != RevisionQinHeng {
-		t.Errorf("QinHeng variant identified as %q, want %q", revision, RevisionQinHeng)
-	}
-	if supported {
-		t.Error("the QinHeng variant is reported as supported, but its protocol is undocumented")
+	candidate, ok = identify(deviceInfo(0x1D6B, 0x0121))
+	if !ok || !candidate.Supported || candidate.Model.Width != 480 {
+		t.Errorf("the 2.1-inch panel was not recognised as 480 wide: %+v", candidate)
 	}
 
-	revision, supported = identify(deviceInfo(0x1A86, 0x7523, "USB Serial"))
-	if revision != RevisionUnknown || supported {
-		t.Errorf("a plain serial adapter = (%q, %v), want (%q, false)", revision, supported, RevisionUnknown)
+	// Known panels this package cannot drive must still be reported, so an
+	// attached panel is never mistaken for an absent one.
+	candidate, ok = identify(deviceInfo(0x1A86, 0xCA21))
+	if !ok {
+		t.Fatal("the QinHeng panel was not reported at all")
+	}
+	if candidate.Supported {
+		t.Error("the QinHeng panel is reported as drivable, but its protocol is undocumented")
+	}
+	if err := candidate.Unsupported(); err == nil {
+		t.Error("an undrivable panel gave no reason")
+	}
+
+	if _, ok := identify(deviceInfo(0x0403, 0x6001)); ok {
+		t.Error("an ordinary FTDI serial adapter was mistaken for a panel")
 	}
 }
 
-func TestUnsupportedExplainsTheQinHengVariant(t *testing.T) {
-	candidate := Candidate{
-		PortName: "COM3", VendorID: vendorQinHeng, ProductID: productQinHeng,
-		Revision: RevisionQinHeng,
+func TestDisplayBitmapCommandCarriesTheFrameSize(t *testing.T) {
+	// 800*480/64 = 6000 = 0x1770. A wrong value here desynchronises the panel
+	// rather than drawing something wrong, so it is worth pinning.
+	if got := Model5Inch.displayBitmapCommand(); got[4] != 0x17 || got[5] != 0x70 {
+		t.Errorf("5-inch frame command = %#x, want it to end 17 70", got)
 	}
-
-	err := candidate.Unsupported()
-	if err == nil {
-		t.Fatal("an unsupported panel reported no reason")
-	}
-	if !strings.Contains(err.Error(), "COM3") {
-		t.Errorf("the reason does not name the port: %v", err)
-	}
-
-	if (Candidate{Supported: true}).Unsupported() != nil {
-		t.Error("a supported panel reported a reason not to drive it")
+	// 480*480/64 = 3600 = 0x0E10.
+	if got := Model2Inch.displayBitmapCommand(); got[4] != 0x0E || got[5] != 0x10 {
+		t.Errorf("2.1-inch frame command = %#x, want it to end 0e 10", got)
 	}
 }
 
 // deviceInfo builds a usb.DeviceInfo for the detection tests.
-func deviceInfo(vid, pid uint16, busDescription string) usb.DeviceInfo {
+func deviceInfo(vid, pid uint16) usb.DeviceInfo {
 	return usb.DeviceInfo{
-		VendorID:       vid,
-		ProductID:      pid,
-		BusDescription: busDescription,
-		PortName:       "COM9",
+		VendorID:  vid,
+		ProductID: pid,
+		PortName:  "COM9",
 	}
 }

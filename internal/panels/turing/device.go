@@ -19,9 +19,10 @@ import (
 // two writers would interleave into nonsense. Callers that render from more
 // than one goroutine serialise on the mutex Device already holds.
 type Device struct {
-	log  *slog.Logger
-	port transport
-	out  *blockWriter
+	log   *slog.Logger
+	port  transport
+	out   *blockWriter
+	model Model
 
 	mu sync.Mutex
 
@@ -40,8 +41,11 @@ type transport interface {
 
 // Options configures the connection.
 type Options struct {
-	// PortName is the COM port the panel is attached to, e.g. "COM3".
+	// PortName is the COM port the panel is attached to, e.g. "COM10".
 	PortName string
+	// Model sets the panel's size and frame command. The zero value is the
+	// 5-inch panel, which is the common case.
+	Model Model
 
 	// ReadTimeout bounds waiting for a status reply.
 	ReadTimeout time.Duration
@@ -67,7 +71,10 @@ func Open(opts Options) (*Device, error) {
 		return nil, err
 	}
 
-	device := newDevice(port)
+	if opts.Model.Width == 0 {
+		opts.Model = Model5Inch
+	}
+	device := newDevice(port, opts.Model)
 
 	// Whatever a previous owner left queued would otherwise be read as this
 	// session's handshake reply.
@@ -81,18 +88,25 @@ func Open(opts Options) (*Device, error) {
 		return nil, err
 	}
 
-	device.log.Info("panel opened", "firmware", device.firmware, "size", fmt.Sprintf("%dx%d", Width, Height))
+	device.log.Info("panel opened", "firmware", device.firmware, "model", device.model.String())
 	return device, nil
 }
 
 // newDevice wires a device around an open transport.
-func newDevice(port transport) *Device {
+func newDevice(port transport, model Model) *Device {
+	if model.Width == 0 {
+		model = Model5Inch
+	}
 	return &Device{
-		log:  logging.For("panels.turing").With("port", port.Name()),
-		port: port,
-		out:  newBlockWriter(port),
+		log:   logging.For("panels.turing").With("port", port.Name()),
+		port:  port,
+		out:   newBlockWriter(port),
+		model: model,
 	}
 }
+
+// Model returns the panel this device was opened as.
+func (d *Device) Model() Model { return d.model }
 
 // hello performs the handshake and records the panel's reply.
 func (d *Device) hello() error {
@@ -115,10 +129,10 @@ func (d *Device) hello() error {
 			"and stays silent, which is what this looks like. "+
 			"Run 'panelctl turing list' to see which one is attached", d.port.Name())
 	}
-	if !strings.HasPrefix(response, helloResponse) {
-		return fmt.Errorf("turing: panel on %s answered %q, want a %q panel "+
-			"(other revisions speak a different protocol)",
-			d.port.Name(), response, helloResponse)
+	if !strings.HasPrefix(response, d.model.Handshake) {
+		return fmt.Errorf("turing: panel on %s answered %q, but it was opened as a %s, "+
+			"which answers %q. A frame sized for the wrong model desynchronises the panel",
+			d.port.Name(), response, d.model.Name, d.model.Handshake)
 	}
 	return nil
 }
@@ -152,7 +166,7 @@ func (d *Device) SetBrightness(percent int) error {
 
 // Clear fills the panel with one colour.
 func (d *Device) Clear(r, g, b uint8) error {
-	frame := make([]byte, FrameSize)
+	frame := make([]byte, d.model.FrameSize())
 	for i := 0; i < len(frame); i += bytesPerPixel {
 		frame[i+0] = b
 		frame[i+1] = g
@@ -167,22 +181,25 @@ func (d *Device) Clear(r, g, b uint8) error {
 
 // DisplayImage sends one full-screen frame.
 //
-// The image must be exactly the panel's size. Partial updates exist in the
-// protocol but are not implemented: a panel driven by this project is repainted
-// whole on every tick anyway, so the block accounting they require would buy
-// nothing.
+// The image must be exactly the panel's size.
+//
+// A full frame is 1.5 MB on the 5-inch panel and takes around half a second to
+// land, which caps the refresh rate at roughly two frames per second. The
+// protocol's partial updates -- 80x80 blocks, each with its own header and
+// resend check -- are what the vendor's software uses to go faster, and are
+// not implemented here. Anything wanting a smooth panel needs them.
 func (d *Device) DisplayImage(img *image.RGBA) error {
 	if img == nil {
 		return fmt.Errorf("turing: no image given")
 	}
 	bounds := img.Bounds()
-	if bounds.Dx() != Width || bounds.Dy() != Height {
+	if bounds.Dx() != d.model.Width || bounds.Dy() != d.model.Height {
 		return fmt.Errorf("turing: image is %dx%d, panel is %dx%d",
-			bounds.Dx(), bounds.Dy(), Width, Height)
+			bounds.Dx(), bounds.Dy(), d.model.Width, d.model.Height)
 	}
 
-	frame := make([]byte, FrameSize)
-	EncodeRGBA(frame, img)
+	frame := make([]byte, d.model.FrameSize())
+	EncodeRGBA(frame, img, d.model)
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -192,8 +209,9 @@ func (d *Device) DisplayImage(img *image.RGBA) error {
 // DisplayFrame sends an already-encoded frame, for callers reusing a buffer
 // across repaints rather than allocating one per tick.
 func (d *Device) DisplayFrame(frame []byte) error {
-	if len(frame) != FrameSize {
-		return fmt.Errorf("turing: frame is %d bytes, want %d", len(frame), FrameSize)
+	if want := d.model.FrameSize(); len(frame) != want {
+		return fmt.Errorf("turing: frame is %d bytes, want %d for a %s",
+			len(frame), want, d.model.Name)
 	}
 
 	d.mu.Lock()
@@ -218,7 +236,7 @@ func (d *Device) sendFrame(frame []byte) error {
 		return err
 	}
 
-	if err := d.out.write(cmdDisplayBitmap, 0x00); err != nil {
+	if err := d.out.write(d.model.displayBitmapCommand(), 0x00); err != nil {
 		return err
 	}
 	if err := d.out.flush(0x00); err != nil {

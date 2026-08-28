@@ -69,6 +69,21 @@ var devPKeyDeviceBusReportedDeviceDesc = devPropKey{
 	pid: 4,
 }
 
+// guidDeviceInterfaceComPort is GUID_DEVINTERFACE_COMPORT, the interface class
+// serial ports expose.
+//
+// It is enumerated alongside the USB class because a composite device -- which
+// is what several panels are -- exposes its serial port on a child interface
+// node. The USB class enumeration reaches only the parent, which carries the
+// vendor and product identifiers but no port name, so neither list alone
+// describes such a device completely.
+var guidDeviceInterfaceComPort = windows.GUID{
+	Data1: 0x86E0D1E0,
+	Data2: 0x8089,
+	Data3: 0x11D0,
+	Data4: [8]byte{0x9C, 0xE4, 0x08, 0x00, 0x3E, 0x30, 0x1F, 0x73},
+}
+
 // guidDeviceInterfaceUSB is GUID_DEVINTERFACE_USB_DEVICE, the interface class
 // WinUSB-bound devices expose.
 var guidDeviceInterfaceUSB = windows.GUID{
@@ -136,13 +151,60 @@ func (d DeviceInfo) IsSerial() bool { return d.PortName != "" }
 // Devices bound to a class driver rather than WinUSB do not appear here; that
 // is the correct behaviour, since they cannot be driven this way.
 func Enumerate() ([]DeviceInfo, error) {
+	devices, err := enumerateClass(&guidDeviceInterfaceUSB)
+	if err != nil {
+		return nil, err
+	}
+
+	// A composite device's port lives on a child node, so the port names are
+	// gathered separately and folded back onto the device they belong to.
+	ports, err := enumerateClass(&guidDeviceInterfaceComPort)
+	if err != nil {
+		return devices, nil // the USB list is still usable without port names
+	}
+	return mergePorts(devices, ports), nil
+}
+
+// mergePorts attaches each serial port to its USB device.
+//
+// A port whose parent is not in the USB list -- which happens when the device
+// is not a USB one at all, such as a motherboard's built-in COM1 -- is dropped
+// rather than reported as a phantom device.
+func mergePorts(devices, ports []DeviceInfo) []DeviceInfo {
+	for _, port := range ports {
+		if port.PortName == "" {
+			continue
+		}
+
+		for i := range devices {
+			if devices[i].PortName != "" {
+				continue
+			}
+			if devices[i].VendorID != port.VendorID || devices[i].ProductID != port.ProductID {
+				continue
+			}
+
+			devices[i].PortName = port.PortName
+			// The child interface usually carries the more specific name; the
+			// parent of a composite device just says "USB Composite Device".
+			if port.BusDescription != "" {
+				devices[i].BusDescription = port.BusDescription
+			}
+			break
+		}
+	}
+	return devices
+}
+
+// enumerateClass lists the present devices exposing one device interface class.
+func enumerateClass(guid *windows.GUID) ([]DeviceInfo, error) {
 	handle, _, err := procSetupDiGetClassDevsW.Call(
-		uintptr(unsafe.Pointer(&guidDeviceInterfaceUSB)),
+		uintptr(unsafe.Pointer(guid)),
 		0, 0,
 		digcfPresent|digcfDeviceInterface,
 	)
 	if handle == uintptr(windows.InvalidHandle) {
-		return nil, fmt.Errorf("enumerate USB devices: %w", err)
+		return nil, fmt.Errorf("enumerate devices: %w", err)
 	}
 	defer procSetupDiDestroyDeviceInfoList.Call(handle)
 
@@ -153,7 +215,7 @@ func Enumerate() ([]DeviceInfo, error) {
 
 		ret, _, _ := procSetupDiEnumDeviceInterfaces.Call(
 			handle, 0,
-			uintptr(unsafe.Pointer(&guidDeviceInterfaceUSB)),
+			uintptr(unsafe.Pointer(guid)),
 			uintptr(index),
 			uintptr(unsafe.Pointer(&interfaceData)),
 		)

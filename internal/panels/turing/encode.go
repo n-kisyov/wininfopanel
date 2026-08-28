@@ -9,16 +9,16 @@ import "image"
 // a frame carrying the overlay's transparency would come out darkened wherever
 // the layout left the canvas bare.
 //
-// dst must be FrameSize bytes and img exactly the panel's size; DisplayImage
-// checks both before calling.
-func EncodeRGBA(dst []byte, img *image.RGBA) {
+// dst must be model.FrameSize() bytes and img exactly the panel's size;
+// DisplayImage checks both before calling.
+func EncodeRGBA(dst []byte, img *image.RGBA, model Model) {
 	bounds := img.Bounds()
 
-	for y := 0; y < Height; y++ {
+	for y := 0; y < model.Height; y++ {
 		src := img.Pix[(y+bounds.Min.Y-img.Rect.Min.Y)*img.Stride:]
-		row := dst[y*Width*bytesPerPixel:]
+		row := dst[y*model.Width*bytesPerPixel:]
 
-		for x := 0; x < Width; x++ {
+		for x := 0; x < model.Width; x++ {
 			s := x * 4
 			d := x * bytesPerPixel
 
