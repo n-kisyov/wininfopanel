@@ -15,6 +15,7 @@ import (
 	"github.com/n-kisyov/wininfopanel/internal/display"
 	"github.com/n-kisyov/wininfopanel/internal/logging"
 	"github.com/n-kisyov/wininfopanel/internal/paths"
+	"github.com/n-kisyov/wininfopanel/internal/plugins"
 	"github.com/n-kisyov/wininfopanel/internal/render/draw"
 	"github.com/n-kisyov/wininfopanel/internal/render/font"
 	"github.com/n-kisyov/wininfopanel/internal/render/media"
@@ -36,8 +37,9 @@ type App struct {
 	Images   *media.Loader
 	History  *draw.HistoryStore
 
-	hwinfo *hwinfo.Reader
-	native *native.Monitor
+	hwinfo  *hwinfo.Reader
+	native  *native.Monitor
+	Plugins *plugins.Manager
 
 	mu      sync.Mutex
 	running bool
@@ -53,6 +55,8 @@ type Options struct {
 	// NoOverlays starts the engine without showing any desktop windows, which
 	// is what headless tooling wants.
 	NoOverlays bool
+	// NoPlugins skips starting plugin processes.
+	NoPlugins bool
 }
 
 // New builds the application without starting anything.
@@ -101,6 +105,19 @@ func New(opts Options) (*App, error) {
 		a.Sensors.Register(sensor.SourceNative, a.native)
 	}
 
+	if !opts.NoPlugins {
+		bundled, _ := paths.BundledPluginsDir()
+		external, _ := paths.ExternalPluginsDir()
+		configDir, _ := paths.PluginConfigDir()
+
+		a.Plugins = plugins.NewManager(plugins.ManagerOptions{
+			BundledDir:  bundled,
+			ExternalDir: external,
+			ConfigDir:   configDir,
+		})
+		a.Sensors.Register(sensor.SourcePlugin, a.Plugins)
+	}
+
 	if !opts.NoOverlays {
 		a.Displays = display.NewManager(display.ManagerOptions{
 			Layouts:           storeLayouts{store: configStore},
@@ -118,6 +135,7 @@ func New(opts Options) (*App, error) {
 		Store:             configStore,
 		HWiNFO:            a.hwinfo,
 		Native:            a.native,
+		Plugins:           a.Plugins,
 		Fonts:             fonts,
 		OnProfilesChanged: a.syncDisplays,
 	})
@@ -144,6 +162,13 @@ func (a *App) Start(ctx context.Context) error {
 	if a.native != nil {
 		a.spawn(func() { a.native.Run(runCtx) })
 	}
+	if a.Plugins != nil {
+		if err := a.Plugins.Start(runCtx); err != nil {
+			// A plugin subsystem failure must not stop the application: panels
+			// bound to other sources still work.
+			a.log.Error("could not start plugins", "error", err)
+		}
+	}
 
 	if a.Displays != nil {
 		if err := a.Displays.Start(runCtx); err != nil {
@@ -155,7 +180,8 @@ func (a *App) Start(ctx context.Context) error {
 	a.log.Info("engine started",
 		"profiles", len(a.Store.Profiles()),
 		"hwinfo", a.hwinfo != nil,
-		"native", a.native != nil)
+		"native", a.native != nil,
+		"plugins", a.Plugins != nil)
 	return nil
 }
 
@@ -181,6 +207,9 @@ func (a *App) Stop() {
 
 	if a.Displays != nil {
 		a.Displays.Stop()
+	}
+	if a.Plugins != nil {
+		a.Plugins.Stop()
 	}
 	if stop != nil {
 		stop()
