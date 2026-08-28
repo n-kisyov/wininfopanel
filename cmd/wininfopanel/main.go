@@ -70,14 +70,17 @@ func run() error {
 		return err
 	}
 
-	if _, err := application.EnsureDefaultProfile(); err != nil {
-		return fmt.Errorf("create the default profile: %w", err)
-	}
-
 	if err := application.Start(ctx); err != nil {
 		return err
 	}
 	defer application.Stop()
+
+	// Seeding runs after the engine is up, not before: creating a profile
+	// reconciles the overlays, and doing that while the display manager is
+	// still stopped drops the new profile on the floor.
+	if _, err := application.EnsureDefaultProfile(); err != nil {
+		return err
+	}
 
 	settings := application.Store.Settings()
 	webEnabled := settings.WebServer.Enabled && !*noWeb
