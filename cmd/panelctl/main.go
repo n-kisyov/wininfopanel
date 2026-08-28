@@ -31,6 +31,7 @@ func commands() []command {
 		{"profiles", "list profiles and choose which ones show an overlay", withoutContext(runProfiles)},
 		{"import", "import profiles from an existing InfoPanel installation", runImport},
 		{"usb", "list USB devices, identify LCD panels, or stream a test pattern", runUSB},
+		{"turing", "drive a Turing Smart Screen panel over its serial port", runTuring},
 		{"version", "print build information", runVersion},
 	}
 }
