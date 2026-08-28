@@ -63,13 +63,29 @@ func turingList() error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "PORT\tVID:PID\tREPORTED\tSERIAL")
+	fmt.Fprintln(w, "PORT\tVID:PID\tREPORTED\tSERIAL\tREVISION\tDRIVABLE")
 	for _, c := range candidates {
-		fmt.Fprintf(w, "%s\t%04X:%04X\t%s\t%s\n",
-			c.PortName, c.VendorID, c.ProductID, c.BusDescription, orDash(c.Serial))
+		drivable := "no"
+		if c.Supported {
+			drivable = "yes"
+		}
+		fmt.Fprintf(w, "%s\t%04X:%04X\t%s\t%s\t%s\t%s\n",
+			c.PortName, c.VendorID, c.ProductID, c.BusDescription,
+			orDash(c.Serial), c.Revision, drivable)
 	}
 	fmt.Fprintf(w, "\n%d panel(s)\n", len(candidates))
-	return w.Flush()
+	if err := w.Flush(); err != nil {
+		return err
+	}
+
+	// A panel that is plugged in but undrivable is the interesting case, and
+	// the table alone does not say why.
+	for _, c := range candidates {
+		if err := c.Unsupported(); err != nil {
+			fmt.Printf("\n%s\n", err)
+		}
+	}
+	return nil
 }
 
 // openTuring connects to the panel named by the flags, or the only one found.

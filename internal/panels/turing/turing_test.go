@@ -232,17 +232,44 @@ func TestEncodeRGBACoversEveryPixel(t *testing.T) {
 	}
 }
 
-func TestLooksLikePanelMatchesTheRealDevice(t *testing.T) {
-	// The identifiers of the panel this was developed against.
-	if !looksLikePanel(deviceInfo(vendorQinHeng, productRevC, "UsbMonitor")) {
-		t.Error("the revision C vendor and product identifiers were not recognised")
+func TestIdentifySeparatesTheRevisions(t *testing.T) {
+	revision, supported := identify(deviceInfo(vendorTI, productRevC, "UsbMonitor"))
+	if revision != RevisionC || !supported {
+		t.Errorf("revision C = (%q, %v), want (%q, true)", revision, supported, RevisionC)
 	}
-	// Name alone is enough, since other revisions report it with their own IDs.
-	if !looksLikePanel(deviceInfo(0x0000, 0x0000, "usbmonitor")) {
-		t.Error("the self-reported name was not matched case-insensitively")
+
+	// The QinHeng variant must be recognised and refused, not driven blind: it
+	// accepts every write and answers nothing.
+	revision, supported = identify(deviceInfo(vendorQinHeng, productQinHeng, "UsbMonitor"))
+	if revision != RevisionQinHeng {
+		t.Errorf("QinHeng variant identified as %q, want %q", revision, RevisionQinHeng)
 	}
-	if looksLikePanel(deviceInfo(0x1A86, 0x7523, "USB Serial")) {
-		t.Error("a plain CH340 serial adapter was mistaken for a panel")
+	if supported {
+		t.Error("the QinHeng variant is reported as supported, but its protocol is undocumented")
+	}
+
+	revision, supported = identify(deviceInfo(0x1A86, 0x7523, "USB Serial"))
+	if revision != RevisionUnknown || supported {
+		t.Errorf("a plain serial adapter = (%q, %v), want (%q, false)", revision, supported, RevisionUnknown)
+	}
+}
+
+func TestUnsupportedExplainsTheQinHengVariant(t *testing.T) {
+	candidate := Candidate{
+		PortName: "COM3", VendorID: vendorQinHeng, ProductID: productQinHeng,
+		Revision: RevisionQinHeng,
+	}
+
+	err := candidate.Unsupported()
+	if err == nil {
+		t.Fatal("an unsupported panel reported no reason")
+	}
+	if !strings.Contains(err.Error(), "COM3") {
+		t.Errorf("the reason does not name the port: %v", err)
+	}
+
+	if (Candidate{Supported: true}).Unsupported() != nil {
+		t.Error("a supported panel reported a reason not to drive it")
 	}
 }
 

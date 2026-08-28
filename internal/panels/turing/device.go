@@ -109,9 +109,15 @@ func (d *Device) hello() error {
 	}
 
 	d.firmware = response
+	if response == "" {
+		return fmt.Errorf("turing: the panel on %s did not answer the handshake. "+
+			"Revision C answers immediately; the QinHeng variant accepts the write "+
+			"and stays silent, which is what this looks like. "+
+			"Run 'panelctl turing list' to see which one is attached", d.port.Name())
+	}
 	if !strings.HasPrefix(response, helloResponse) {
 		return fmt.Errorf("turing: panel on %s answered %q, want a %q panel "+
-			"(revisions A, B, and E speak a different protocol)",
+			"(other revisions speak a different protocol)",
 			d.port.Name(), response, helloResponse)
 	}
 	return nil
