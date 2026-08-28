@@ -24,6 +24,8 @@ var (
 	procSetupDiDestroyDeviceInfoList      = setupapi.NewProc("SetupDiDestroyDeviceInfoList")
 	procSetupDiGetDeviceRegistryPropertyW = setupapi.NewProc("SetupDiGetDeviceRegistryPropertyW")
 	procSetupDiGetDeviceInstanceIdW       = setupapi.NewProc("SetupDiGetDeviceInstanceIdW")
+	procSetupDiGetDevicePropertyW         = setupapi.NewProc("SetupDiGetDevicePropertyW")
+	procSetupDiOpenDevRegKey              = setupapi.NewProc("SetupDiOpenDevRegKey")
 )
 
 // SetupDiGetClassDevs flags.
@@ -38,6 +40,34 @@ const (
 	spdrpFriendlyName = 0x0000000C
 	spdrpLocationInfo = 0x0000000D
 )
+
+// SetupDiOpenDevRegKey scopes.
+const (
+	dicsFlagGlobal = 0x00000001
+	diregDev       = 0x00000001
+)
+
+// devPropKey is DEVPROPKEY, addressing a device property by GUID and index.
+type devPropKey struct {
+	fmtid windows.GUID
+	pid   uint32
+}
+
+// devPKeyDeviceBusReportedDeviceDesc is the name a device reports for itself
+// over the bus, as opposed to the one its driver supplies.
+//
+// It is the only field that distinguishes one CDC-ACM device from another:
+// Windows binds them all to usbser.sys and describes every one of them as
+// "USB Serial Device", while the device's own answer is a real model name.
+var devPKeyDeviceBusReportedDeviceDesc = devPropKey{
+	fmtid: windows.GUID{
+		Data1: 0x540B947E,
+		Data2: 0x8B40,
+		Data3: 0x45BC,
+		Data4: [8]byte{0xA8, 0xA2, 0x6A, 0x0B, 0x89, 0x4C, 0xBD, 0xA2},
+	},
+	pid: 4,
+}
 
 // guidDeviceInterfaceUSB is GUID_DEVINTERFACE_USB_DEVICE, the interface class
 // WinUSB-bound devices expose.
@@ -85,7 +115,20 @@ type DeviceInfo struct {
 	// reports one. A device without one gets a port-derived identifier from
 	// Windows instead, which changes if it is moved.
 	Serial string
+
+	// BusDescription is the name the device reports for itself, which for a
+	// serial panel is the only thing that names the model: its driver-supplied
+	// Description is the generic "USB Serial Device".
+	BusDescription string
+	// PortName is the COM port a device bound to a serial class driver is
+	// reachable through, e.g. "COM3". It is empty for every other device.
+	PortName string
 }
+
+// IsSerial reports whether the device is exposed as a serial port rather than
+// through WinUSB. Such a device cannot be opened by this package -- it is
+// driven over its COM port instead.
+func (d DeviceInfo) IsSerial() bool { return d.PortName != "" }
 
 // Enumerate lists the present USB devices exposing the WinUSB device
 // interface.
@@ -175,10 +218,12 @@ func describeInterface(handle uintptr, interfaceData *spDeviceInterfaceData) (De
 	}
 
 	device := DeviceInfo{
-		Path:        path,
-		InstanceID:  instanceID(handle, &devInfo),
-		Description: registryString(handle, &devInfo, spdrpDeviceDesc),
-		Location:    registryString(handle, &devInfo, spdrpLocationInfo),
+		Path:           path,
+		InstanceID:     instanceID(handle, &devInfo),
+		Description:    registryString(handle, &devInfo, spdrpDeviceDesc),
+		Location:       registryString(handle, &devInfo, spdrpLocationInfo),
+		BusDescription: deviceProperty(handle, &devInfo, &devPKeyDeviceBusReportedDeviceDesc),
+		PortName:       portName(handle, &devInfo),
 	}
 
 	// The vendor and product identifiers are embedded in the path, so they can
@@ -222,6 +267,62 @@ func registryString(handle uintptr, devInfo *spDevinfoData, property uint32) str
 		uintptr(unsafe.Pointer(&required)),
 	)
 	if ret == 0 {
+		return ""
+	}
+	return windows.UTF16PtrToString((*uint16)(unsafe.Pointer(&buffer[0])))
+}
+
+// deviceProperty reads a DEVPKEY string property.
+func deviceProperty(handle uintptr, devInfo *spDevinfoData, key *devPropKey) string {
+	buffer := make([]byte, 512)
+	var propertyType, required uint32
+
+	ret, _, _ := procSetupDiGetDevicePropertyW.Call(
+		handle,
+		uintptr(unsafe.Pointer(devInfo)),
+		uintptr(unsafe.Pointer(key)),
+		uintptr(unsafe.Pointer(&propertyType)),
+		uintptr(unsafe.Pointer(&buffer[0])),
+		uintptr(len(buffer)),
+		uintptr(unsafe.Pointer(&required)),
+		0,
+	)
+	if ret == 0 {
+		return ""
+	}
+	return windows.UTF16PtrToString((*uint16)(unsafe.Pointer(&buffer[0])))
+}
+
+// portName reads the COM port assigned to a device, from the same registry key
+// Device Manager shows it from. A device that is not a serial port has no such
+// value, which is how this distinguishes the two.
+func portName(handle uintptr, devInfo *spDevinfoData) string {
+	key, _, _ := procSetupDiOpenDevRegKey.Call(
+		handle,
+		uintptr(unsafe.Pointer(devInfo)),
+		dicsFlagGlobal,
+		0,
+		diregDev,
+		windows.KEY_READ,
+	)
+	if key == 0 || key == uintptr(windows.InvalidHandle) {
+		return ""
+	}
+	defer windows.RegCloseKey(windows.Handle(key))
+
+	var valueType, size uint32
+	buffer := make([]byte, 64)
+	size = uint32(len(buffer))
+
+	err := windows.RegQueryValueEx(
+		windows.Handle(key),
+		windows.StringToUTF16Ptr("PortName"),
+		nil,
+		&valueType,
+		&buffer[0],
+		&size,
+	)
+	if err != nil {
 		return ""
 	}
 	return windows.UTF16PtrToString((*uint16)(unsafe.Pointer(&buffer[0])))

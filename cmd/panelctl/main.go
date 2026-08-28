@@ -28,6 +28,7 @@ func commands() []command {
 		{"render", "render a graphics test frame to a PNG", runRender},
 		{"panel", "render a profile layout to a PNG using live sensors", runPanel},
 		{"overlay", "show a live desktop overlay window", runOverlay},
+		{"profiles", "list profiles and choose which ones show an overlay", withoutContext(runProfiles)},
 		{"import", "import profiles from an existing InfoPanel installation", runImport},
 		{"usb", "list USB devices, identify LCD panels, or stream a test pattern", runUSB},
 		{"version", "print build information", runVersion},
@@ -77,6 +78,11 @@ func usage() {
 	}
 	b.WriteString("\nrun 'panelctl <command> -h' for a command's flags\n")
 	fmt.Fprint(os.Stderr, b.String())
+}
+
+// withoutContext adapts a subcommand that has no long-running work to do.
+func withoutContext(run func(args []string) error) func(context.Context, []string) error {
+	return func(_ context.Context, args []string) error { return run(args) }
 }
 
 // newFlagSet returns a flag set that prints the command name in errors.

@@ -80,15 +80,24 @@ func usbList(args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "VID:PID\tDESCRIPTION\tSERIAL\tLOCATION")
+	fmt.Fprintln(w, "VID:PID\tDESCRIPTION\tREPORTED\tPORT\tSERIAL\tLOCATION")
 	for _, device := range devices {
-		fmt.Fprintf(w, "%04X:%04X\t%s\t%s\t%s\n",
+		fmt.Fprintf(w, "%04X:%04X\t%s\t%s\t%s\t%s\t%s\n",
 			device.VendorID, device.ProductID,
-			truncate(device.Description, 40),
+			truncate(device.Description, 26),
+			truncate(orDash(device.BusDescription), 20),
+			orDash(device.PortName),
 			orDash(device.Serial),
-			truncate(device.Location, 30))
+			truncate(device.Location, 22))
 	}
 	fmt.Fprintf(w, "\n%d device(s)\n", len(devices))
+
+	// Windows binds every CDC-ACM device to usbser.sys and describes them all
+	// as "USB Serial Device", so REPORTED -- the name the device gives for
+	// itself -- is the only column that tells one serial panel from another.
+	if serial := countSerial(devices); serial > 0 {
+		fmt.Fprintf(w, "%d present a serial port; REPORTED is the device's own name for itself\n", serial)
+	}
 	return w.Flush()
 }
 
@@ -121,6 +130,7 @@ func usbPanels(args []string) error {
 		fmt.Println("  - no other application is using it, since a panel accepts one owner at a time")
 		fmt.Println("  - it is bound to the WinUSB driver rather than a class driver")
 		fmt.Println("  - the cable carries data, not power only")
+		reportSerialCandidates()
 		return nil
 	}
 
@@ -259,4 +269,52 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// countSerial reports how many devices are reachable as a serial port.
+func countSerial(devices []usb.DeviceInfo) int {
+	n := 0
+	for _, device := range devices {
+		if device.IsSerial() {
+			n++
+		}
+	}
+	return n
+}
+
+// reportSerialCandidates lists the serial devices attached, so a panel this
+// build has no driver for is still visible rather than silently absent.
+//
+// BeadaPanel is the only driver implemented; Turing, Thermalright, and
+// Thermaltake panels all present a COM port instead of a WinUSB interface, and
+// every one of them would otherwise show up here as nothing at all.
+func reportSerialCandidates() {
+	devices, err := usb.Enumerate()
+	if err != nil {
+		return
+	}
+
+	var serial []usb.DeviceInfo
+	for _, device := range devices {
+		if device.IsSerial() {
+			serial = append(serial, device)
+		}
+	}
+	if len(serial) == 0 {
+		return
+	}
+
+	fmt.Println()
+	fmt.Printf("%d serial device(s) are attached. No driver for these is implemented yet,\n", len(serial))
+	fmt.Println("so none can be driven, but a panel would appear among them:")
+	fmt.Println()
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "  PORT\tVID:PID\tREPORTED\tSERIAL")
+	for _, device := range serial {
+		fmt.Fprintf(w, "  %s\t%04X:%04X\t%s\t%s\n",
+			device.PortName, device.VendorID, device.ProductID,
+			orDash(device.BusDescription), orDash(device.Serial))
+	}
+	w.Flush()
 }
