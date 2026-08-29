@@ -129,12 +129,32 @@ func run() error {
 			0, 0, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 		})
 
+		mAutostart := systray.AddMenuItemCheckbox("Run at Startup", "Start automatically with Windows", false)
+		if enabled, _ := app.IsAutostartEnabled(); enabled {
+			mAutostart.Check()
+		}
+
 		mQuit := systray.AddMenuItem("Quit", "Quit WinInfoPanel")
 		
 		go func() {
-			<-mQuit.ClickedCh
-			stop() // Signal context cancellation
-			systray.Quit()
+			for {
+				select {
+				case <-mAutostart.ClickedCh:
+					if mAutostart.Checked() {
+						if err := app.DisableAutostart(); err == nil {
+							mAutostart.Uncheck()
+						}
+					} else {
+						if err := app.EnableAutostart(); err == nil {
+							mAutostart.Check()
+						}
+					}
+				case <-mQuit.ClickedCh:
+					stop() // Signal context cancellation
+					systray.Quit()
+					return
+				}
+			}
 		}()
 
 		// Also quit if context is cancelled (e.g. by Ctrl+C)
