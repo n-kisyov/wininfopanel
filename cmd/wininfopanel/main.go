@@ -16,6 +16,8 @@ import (
 	"github.com/n-kisyov/wininfopanel/internal/app"
 	"github.com/n-kisyov/wininfopanel/internal/logging"
 	"github.com/n-kisyov/wininfopanel/internal/web"
+
+	"github.com/getlantern/systray"
 )
 
 // version is stamped at build time with -ldflags "-X main.version=...".
@@ -112,9 +114,41 @@ func run() error {
 		fmt.Printf("web interface: http://%s/\n", server.Address())
 	}
 
-	fmt.Println("wininfopanel is running; press Ctrl+C to stop")
-	<-ctx.Done()
+	fmt.Println("wininfopanel is running (check system tray); press Ctrl+C to stop")
 
-	log.Info("shutting down")
+	onReady := func() {
+		systray.SetTitle("WinInfoPanel")
+		systray.SetTooltip("WinInfoPanel")
+
+		// Tiny dummy 1x1 icon
+		systray.SetIcon([]byte{
+			0, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 24, 0, 68, 0,
+			0, 0, 22, 0, 0, 0, 40, 0, 0, 0, 1, 0, 0, 0, 2, 0,
+			0, 0, 1, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+			0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+			0, 0, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		})
+
+		mQuit := systray.AddMenuItem("Quit", "Quit WinInfoPanel")
+		
+		go func() {
+			<-mQuit.ClickedCh
+			stop() // Signal context cancellation
+			systray.Quit()
+		}()
+
+		// Also quit if context is cancelled (e.g. by Ctrl+C)
+		go func() {
+			<-ctx.Done()
+			systray.Quit()
+		}()
+	}
+
+	onExit := func() {
+		log.Info("shutting down")
+	}
+
+	systray.Run(onReady, onExit)
+
 	return nil
 }
