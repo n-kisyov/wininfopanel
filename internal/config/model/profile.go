@@ -81,15 +81,29 @@ func NewProfile(name string, width, height int) *Profile {
 	}
 }
 
-// Clone returns a copy of the profile carrying a fresh ID.
-func (p *Profile) Clone() *Profile {
+// Copy returns an independent copy of the profile, keeping its identity.
+//
+// It is what a read accessor hands out. A plain `*p` would share TargetWindow
+// with the original, so a caller editing what it was told is its own copy
+// would be writing back into the source -- for the config store that means its
+// live state, outside the lock and without persisting.
+func (p *Profile) Copy() *Profile {
 	c := *p
-	c.ID = uuid.NewString()
 	if p.TargetWindow != nil {
 		tw := *p.TargetWindow
 		c.TargetWindow = &tw
 	}
 	return &c
+}
+
+// Clone returns a copy of the profile carrying a fresh ID.
+//
+// Copy is the same thing keeping the original's identity; building on it here
+// is what stops the two drifting apart as fields are added.
+func (p *Profile) Clone() *Profile {
+	c := p.Copy()
+	c.ID = uuid.NewString()
+	return c
 }
 
 // Size returns the profile's canvas dimensions.

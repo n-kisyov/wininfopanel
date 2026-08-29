@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 )
 
 // writeJSONAtomic serializes v to path without ever leaving a truncated file
@@ -20,6 +22,10 @@ func writeJSONAtomic(path string, v any) error {
 		return fmt.Errorf("encode %s: %w", filepath.Base(path), err)
 	}
 	data = append(data, '\n')
+
+	// Encoding is per-caller work; everything past here touches the one path
+	// and has to be the only writer doing so.
+	defer lockPath(path)()
 
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -58,6 +64,32 @@ func writeJSONAtomic(path string, v any) error {
 		return fmt.Errorf("replace %s: %w", path, err)
 	}
 	return nil
+}
+
+// pathLocks serialises writes, one mutex per file.
+//
+// writeJSONAtomic is crash-safe on its own: the temp file, the rotation of the
+// old contents to ".bak", and the rename into place are ordered so an
+// interrupted write costs at most the save in progress. It is not safe against
+// a second writer. Two overlapping saves of the same file can rotate a
+// half-written copy into the backup slot, which leaves the recovery path
+// holding a second copy of the damage rather than the good previous version.
+//
+// The store saves from HTTP handler goroutines, so two concurrent requests
+// touching the same profile reach exactly that.
+var pathLocks sync.Map // canonical path -> *sync.Mutex
+
+// lockPath takes the lock for one file and returns the release.
+func lockPath(path string) func() {
+	// Windows paths are case-insensitive, so two spellings of one file must
+	// not end up with two different mutexes.
+	key := strings.ToLower(filepath.Clean(path))
+
+	value, _ := pathLocks.LoadOrStore(key, new(sync.Mutex))
+	mu := value.(*sync.Mutex)
+
+	mu.Lock()
+	return mu.Unlock
 }
 
 // ErrRecoveredFromBackup reports that the primary file was unreadable and its

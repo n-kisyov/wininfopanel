@@ -38,6 +38,14 @@ type Store struct {
 	mu       sync.RWMutex
 	settings *model.Settings
 	profiles []*model.Profile
+	// profilesLoadFailed records that the profile index could not be read at
+	// all -- neither the file nor its backup parsed.
+	//
+	// An empty profile list then means "unknown", not "none", and the two must
+	// not be confused: PruneOrphans deletes everything a live profile does not
+	// claim, so acting on an unknown list would take the user's layouts and
+	// assets with it.
+	profilesLoadFailed bool
 	// layouts holds display items per profile ID. A profile absent from the
 	// map has not been loaded yet; loading is lazy.
 	layouts map[string]model.ItemList
@@ -114,6 +122,14 @@ func (s *Store) loadProfiles() {
 		} else {
 			s.log.Error("profile index could not be read; starting with no profiles", "error", err)
 			profiles = nil
+			s.profilesLoadFailed = true
+
+			// The first save from here rotates the unreadable file into the
+			// ".bak" slot and the one after that overwrites it, so without this
+			// the damaged index is gone within two writes. It is worth keeping:
+			// it is the only record of which profile each quarantined layout
+			// file belonged to, and of what the user called them.
+			s.preserveUnreadableIndex()
 		}
 	}
 
@@ -130,11 +146,52 @@ func (s *Store) loadProfiles() {
 	s.profiles = kept
 }
 
+// preserveUnreadableIndex copies the damaged profile index into quarantine.
+//
+// Copy rather than move: leaving the original in place keeps Open's behaviour
+// unchanged for everything downstream, and a second start with the file still
+// broken simply preserves it again under a new timestamp.
+func (s *Store) preserveUnreadableIndex() {
+	dest, err := s.newQuarantineDir()
+	if err != nil {
+		s.log.Warn("could not preserve the unreadable profile index", "error", err)
+		return
+	}
+
+	for _, name := range []string{profilesFileName, profilesFileName + ".bak"} {
+		data, err := os.ReadFile(filepath.Join(s.root, name))
+		if err != nil {
+			continue // a missing backup is ordinary
+		}
+		path := filepath.Join(dest, name)
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			s.log.Warn("could not preserve the unreadable profile index",
+				"path", path, "error", err)
+			continue
+		}
+		s.log.Warn("kept a copy of the unreadable profile index", "path", path)
+	}
+}
+
 // Settings returns a copy of the current settings.
+//
+// The copy is independent: editing the returned value, including its panel and
+// hotkey lists, cannot reach the store.
 func (s *Store) Settings() model.Settings {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return *s.settings
+	return s.settings.Clone()
+}
+
+// ProfilesLoadFailed reports that the profile index could not be read when the
+// store was opened.
+//
+// It is not the same as having no profiles: it means the list is unknown, and
+// anything that would act on a profile's absence has to hold off.
+func (s *Store) ProfilesLoadFailed() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.profilesLoadFailed
 }
 
 // UpdateSettings applies fn to the settings under lock, normalizes the result,
@@ -143,7 +200,7 @@ func (s *Store) UpdateSettings(fn func(*model.Settings)) error {
 	s.mu.Lock()
 	fn(s.settings)
 	s.settings.Normalize()
-	snapshot := *s.settings
+	snapshot := s.settings.Clone()
 	s.mu.Unlock()
 
 	return writeJSONAtomic(s.settingsPath(), &snapshot)
@@ -152,7 +209,7 @@ func (s *Store) UpdateSettings(fn func(*model.Settings)) error {
 // SaveSettings persists the current settings without modifying them.
 func (s *Store) SaveSettings() error {
 	s.mu.RLock()
-	snapshot := *s.settings
+	snapshot := s.settings.Clone()
 	s.mu.RUnlock()
 	return writeJSONAtomic(s.settingsPath(), &snapshot)
 }
@@ -164,8 +221,7 @@ func (s *Store) Profiles() []*model.Profile {
 
 	out := make([]*model.Profile, len(s.profiles))
 	for i, p := range s.profiles {
-		clone := *p
-		out[i] = &clone
+		out[i] = p.Copy()
 	}
 	return out
 }
@@ -177,8 +233,7 @@ func (s *Store) Profile(id string) (*model.Profile, bool) {
 
 	for _, p := range s.profiles {
 		if p.ID == id {
-			clone := *p
-			return &clone, true
+			return p.Copy(), true
 		}
 	}
 	return nil, false
@@ -198,8 +253,7 @@ func (s *Store) AddProfile(p *model.Profile) error {
 			return fmt.Errorf("profile %s already exists", p.ID)
 		}
 	}
-	clone := *p
-	s.profiles = append(s.profiles, &clone)
+	s.profiles = append(s.profiles, p.Copy())
 	if _, ok := s.layouts[p.ID]; !ok {
 		s.layouts[p.ID] = nil
 	}
@@ -312,8 +366,7 @@ func (s *Store) saveProfileIndex() error {
 	s.mu.RLock()
 	snapshot := make([]*model.Profile, len(s.profiles))
 	for i, p := range s.profiles {
-		clone := *p
-		snapshot[i] = &clone
+		snapshot[i] = p.Copy()
 	}
 	s.mu.RUnlock()
 

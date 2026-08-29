@@ -1,5 +1,7 @@
 package model
 
+import "slices"
+
 // Theme selects the UI color scheme. Only Dark ships initially; the value is
 // persisted so light and custom themes can be added without a migration.
 type Theme string
@@ -127,6 +129,32 @@ type Settings struct {
 	ThermaltakePanels  []PanelDevice `json:"thermaltakePanels,omitempty"`
 
 	Hotkeys []HotkeyBinding `json:"hotkeys,omitempty"`
+}
+
+// Clone returns an independent copy of the settings.
+//
+// Settings is passed around by value, but four panel lists and the hotkey
+// bindings are slices, and a hotkey's modifiers are a slice again -- a plain
+// `*s` shares every one of them with the original. Anything handing a Settings
+// out to a caller that may edit it has to come through here, or that edit
+// lands in the source: for the config store, in its live state, outside the
+// lock and without persisting.
+func (s *Settings) Clone() Settings {
+	c := *s
+
+	c.BeadaPanels = slices.Clone(s.BeadaPanels)
+	c.TuringPanels = slices.Clone(s.TuringPanels)
+	c.ThermalrightPanels = slices.Clone(s.ThermalrightPanels)
+	c.ThermaltakePanels = slices.Clone(s.ThermaltakePanels)
+
+	c.Hotkeys = slices.Clone(s.Hotkeys)
+	for i := range c.Hotkeys {
+		// The bindings themselves are copied by the clone above, but each one
+		// carries a modifier slice of its own.
+		c.Hotkeys[i].Modifiers = slices.Clone(c.Hotkeys[i].Modifiers)
+	}
+
+	return c
 }
 
 // SettingsVersion is the current settings schema version.
