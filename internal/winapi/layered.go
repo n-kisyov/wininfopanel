@@ -520,7 +520,7 @@ func windowProc(hwnd windows.Handle, message uint32, wParam, lParam uintptr) uin
 		}
 		return ret
 
-	case wmRButtonUp:
+	case wmRButtonUp, wmNCRButtonUp:
 		if w.opts.OnRightClick != nil {
 			w.opts.OnRightClick()
 		}

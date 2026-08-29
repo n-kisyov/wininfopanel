@@ -18,7 +18,6 @@ var (
 	procDestroyWindow     = user32.NewProc("DestroyWindow")
 	procDefWindowProcW    = user32.NewProc("DefWindowProcW")
 	procGetMessageW       = user32.NewProc("GetMessageW")
-	procPeekMessageW      = user32.NewProc("PeekMessageW")
 	procTranslateMessage  = user32.NewProc("TranslateMessage")
 	procDispatchMessageW  = user32.NewProc("DispatchMessageW")
 	procPostQuitMessage   = user32.NewProc("PostQuitMessage")
@@ -35,8 +34,6 @@ var (
 	procEnumDisplayMons   = user32.NewProc("EnumDisplayMonitors")
 	procGetMonitorInfoW   = user32.NewProc("GetMonitorInfoW")
 	procSetProcessDpiCtx  = user32.NewProc("SetProcessDpiAwarenessContext")
-	procGetDpiForWindow   = user32.NewProc("GetDpiForWindow")
-	procReleaseCapture    = user32.NewProc("ReleaseCapture")
 
 	procCreateCompatibleDC = gdi32.NewProc("CreateCompatibleDC")
 	procCreateDIBSection   = gdi32.NewProc("CreateDIBSection")
@@ -66,6 +63,7 @@ const (
 	wmNCLButtonDown = 0x00A1
 	wmLButtonDown   = 0x0201
 	wmRButtonUp     = 0x0205
+	wmNCRButtonUp   = 0x00A5
 	wmDisplayChange = 0x007E
 	wmDPIChanged    = 0x02E0
 	// wmAppRedraw asks the window thread to repaint. WM_APP is the first
@@ -213,7 +211,3 @@ func SetPerMonitorDPIAware() error {
 func makeIntResource(id uint16) *uint16 {
 	return (*uint16)(unsafe.Pointer(uintptr(id)))
 }
-
-// loWord and hiWord split a packed LPARAM coordinate pair.
-func loWord(v uintptr) int32 { return int32(int16(v & 0xFFFF)) }
-func hiWord(v uintptr) int32 { return int32(int16((v >> 16) & 0xFFFF)) }
