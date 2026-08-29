@@ -16,6 +16,7 @@ import (
 
 	"github.com/Microsoft/go-winio"
 	"github.com/google/uuid"
+	"golang.org/x/sys/windows"
 
 	"github.com/n-kisyov/wininfopanel/internal/logging"
 	"github.com/n-kisyov/wininfopanel/pkg/plugin"
@@ -53,6 +54,11 @@ type client struct {
 	// for the plugin to go away without polling.
 	closedCh  chan struct{}
 	closeOnce sync.Once
+
+	// stderrDone is closed once the stderr drain has read the pipe to the end.
+	// os/exec closes that pipe as soon as Wait sees the process exit, so Wait
+	// must not run while the drain is still reading.
+	stderrDone chan struct{}
 }
 
 // newClient prepares a client. Nothing runs until start is called.
@@ -66,6 +72,7 @@ func newClient(descriptor Descriptor,
 		onContainers: onContainers,
 		onValues:     onValues,
 		closedCh:     make(chan struct{}),
+		stderrDone:   make(chan struct{}),
 	}
 }
 
@@ -75,16 +82,36 @@ func newClient(descriptor Descriptor,
 // application, so every request has a deadline rather than blocking forever.
 const requestTimeout = 15 * time.Second
 
+// pipeSecurityDescriptor limits the plugin pipe to this user.
+//
+// Anything that can connect to the pipe can publish the sensor values the
+// panels display, and can read the configuration exchanged over it, which may
+// hold credentials. So the DACL is protected -- no inheritance -- and names
+// exactly three trustees: the account running wininfopanel, which is also what
+// the plugin runs as, plus Local System and the administrators who could take
+// ownership regardless.
+func pipeSecurityDescriptor() (string, error) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return "", fmt.Errorf("resolve the current user for the plugin pipe: %w", err)
+	}
+	return "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;" + user.User.Sid.String() + ")", nil
+}
+
 // start launches the plugin process and completes the handshake.
 func (c *client) start(ctx context.Context) error {
 	// The pipe is created before the process starts, so the plugin cannot lose
 	// a race trying to connect to something that does not exist yet.
 	pipeName := `\\.\pipe\wininfopanel-` + uuid.NewString()
 
+	descriptor, err := pipeSecurityDescriptor()
+	if err != nil {
+		c.markClosed()
+		return err
+	}
+
 	listener, err := winio.ListenPipe(pipeName, &winio.PipeConfig{
-		// Only this user's processes may connect: a plugin channel can carry
-		// configuration values such as API keys.
-		SecurityDescriptor: "D:P(A;;GA;;;WD)",
+		SecurityDescriptor: descriptor,
 		MessageMode:        false,
 	})
 	if err != nil {
@@ -113,18 +140,26 @@ func (c *client) start(ctx context.Context) error {
 		return fmt.Errorf("start %s: %w", c.descriptor.Executable, err)
 	}
 
+	// The drain starts before the process is recorded, so that a recorded cmd
+	// always has a drain behind it: stop waits on stderrDone before reaping,
+	// and would otherwise wait on something nobody is going to close.
 	go c.drainStderr(stderr)
+
+	// Recorded before the plugin has connected, so a failure to connect can go
+	// through stop and be reaped like any other exit -- killing the process
+	// here without waiting would leak the handle.
+	c.mu.Lock()
+	c.cmd, c.listener = cmd, listener
+	c.mu.Unlock()
 
 	conn, err := acceptWithTimeout(ctx, listener, requestTimeout)
 	if err != nil {
-		listener.Close()
-		cmd.Process.Kill()
-		c.markClosed()
+		c.stop()
 		return fmt.Errorf("plugin did not connect: %w", err)
 	}
 
 	c.mu.Lock()
-	c.cmd, c.conn, c.listener = cmd, conn, listener
+	c.conn = conn
 	c.encoder = json.NewEncoder(conn)
 	c.mu.Unlock()
 
@@ -314,9 +349,16 @@ func (c *client) readLoop() {
 		switch message.Kind {
 		case plugin.KindResponse:
 			if waiter, ok := c.pending.Load(message.ID); ok {
-				// Buffered, so a caller that has already timed out does not
-				// block the read loop.
-				waiter.(chan plugin.Message) <- message
+				select {
+				case waiter.(chan plugin.Message) <- message:
+				default:
+					// The channel holds one reply already, or its caller timed
+					// out between the load above and here. Either way a second
+					// answer to one request is the plugin's mistake, and this
+					// loop carries everything the plugin publishes -- blocking
+					// on it would silence the plugin entirely.
+					c.log.Warn("discarded a duplicate plugin response", "id", message.ID)
+				}
 			}
 
 		case plugin.KindValues:
@@ -366,14 +408,37 @@ func (c *client) logFromPlugin(entry plugin.LogNotification) {
 	}
 }
 
+// maxStderrLine bounds one logged line of a plugin's stderr.
+//
+// A default bufio.Scanner gives up at 64KB and never resumes. Once nothing is
+// draining stderr the pipe fills and the plugin blocks on its next write --
+// it hangs, with nothing anywhere saying why. A megabyte is far past any
+// reasonable log line, and the drain below covers the rest.
+const maxStderrLine = 1 << 20
+
 // drainStderr forwards a plugin's stderr into the application log.
+//
+// It must read the pipe to the end, whatever it finds there: this is the only
+// reader, and a plugin blocked writing to a full stderr is a plugin that has
+// stopped doing its job.
 func (c *client) drainStderr(stderr io.ReadCloser) {
+	defer close(c.stderrDone)
+
 	scanner := bufio.NewScanner(stderr)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxStderrLine)
+
 	for scanner.Scan() {
 		if line := scanner.Text(); line != "" {
 			c.log.Warn("plugin stderr", "message", line)
 		}
 	}
+	if err := scanner.Err(); err != nil && !c.isClosed() {
+		c.log.Debug("stopped reading plugin stderr", "error", err)
+	}
+
+	// Whatever the scanner stopped on -- a line past the limit, a read error --
+	// the pipe still has to be emptied.
+	io.Copy(io.Discard, stderr)
 }
 
 // markClosed signals that the connection is gone. It is idempotent: both the
@@ -429,6 +494,10 @@ func (c *client) stop() {
 
 	exited := make(chan struct{})
 	go func() {
+		// os/exec closes the stderr pipe once Wait sees the process exit, so
+		// calling Wait while the drain is still reading is documented as
+		// incorrect and can cut its last output short.
+		<-c.stderrDone
 		cmd.Wait()
 		close(exited)
 	}()

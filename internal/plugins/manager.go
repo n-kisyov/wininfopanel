@@ -35,7 +35,10 @@ type Manager struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	// started guards against a second Start, which would supervise every
+	// plugin twice and run two processes for each.
+	started bool
+	wg      sync.WaitGroup
 }
 
 // ManagerOptions configures a Manager.
@@ -90,6 +93,23 @@ type runningPlugin struct {
 	descriptor Descriptor
 	client     *client
 
+	// cancel ends this plugin's supervisor without disturbing the others. It
+	// also unblocks a supervisor sitting in its restart backoff, so switching a
+	// plugin off takes effect now rather than seconds from now.
+	cancel context.CancelFunc
+	// stopping marks a stop somebody asked for, so the supervisor can tell it
+	// apart from a crash.
+	//
+	// Cancelling the context cannot carry that meaning on its own: it kills the
+	// process through exec.CommandContext, which would take the plugin's own
+	// shutdown handling with it. So a deliberate stop sets this first, shuts
+	// the client down politely, and only then cancels.
+	stopping bool
+	// done is closed once the supervisor has exited and this entry is out of
+	// the running set, which is what lets stopEntry mean "it has stopped"
+	// rather than "it has been asked to".
+	done chan struct{}
+
 	// restarts records when this plugin was last restarted, so repeated
 	// failures can be distinguished from an isolated one.
 	restarts []time.Time
@@ -122,6 +142,11 @@ func (m *Manager) Discover() []Descriptor {
 // Start begins running the enabled plugins.
 func (m *Manager) Start(ctx context.Context) error {
 	m.mu.Lock()
+	if m.started {
+		m.mu.Unlock()
+		return fmt.Errorf("the plugin manager is already running")
+	}
+	m.started = true
 	m.ctx, m.cancel = context.WithCancel(ctx)
 	runCtx := m.ctx
 	m.mu.Unlock()
@@ -142,36 +167,136 @@ func (m *Manager) Stop() {
 	m.mu.Lock()
 	cancel := m.cancel
 	running := make([]*runningPlugin, 0, len(m.running))
-	for name, entry := range m.running {
+	for _, entry := range m.running {
 		running = append(running, entry)
-		delete(m.running, name)
 	}
 	m.mu.Unlock()
+
+	// Each plugin is stopped deliberately before the shared context is
+	// cancelled, so every one of them gets its shutdown handling run rather
+	// than being killed where it stands. In parallel, because stopEntry waits
+	// for its plugin and one slow shutdown should not hold up the others.
+	var stopping sync.WaitGroup
+	for _, entry := range running {
+		stopping.Add(1)
+		go func() {
+			defer stopping.Done()
+			m.stopEntry(entry)
+		}()
+	}
+	stopping.Wait()
 
 	if cancel != nil {
 		cancel()
 	}
-	for _, entry := range running {
-		if entry.client != nil {
-			entry.client.stop()
-		}
-	}
 	m.wg.Wait()
+
+	m.mu.Lock()
+	m.running = make(map[string]*runningPlugin)
+	m.started = false
+	m.ctx, m.cancel = nil, nil
+	m.mu.Unlock()
+}
+
+// stopEntry shuts one plugin down deliberately and withdraws its sensors.
+//
+// The order is the whole point. Marking the entry tells its supervisor this is
+// a stop rather than a crash -- without it the supervisor treats the
+// disconnect as a failure and restarts the plugin that was just switched off.
+// The polite shutdown then has to happen before the cancel, because cancelling
+// kills the process outright.
+//
+// It returns only once the supervisor has actually gone. Returning earlier
+// would make "disable then enable" a race: the entry would still be in the
+// running set, the enable would take it for a live supervisor and do nothing,
+// and then the old supervisor would retire -- leaving the plugin switched on
+// and not running.
+func (m *Manager) stopEntry(entry *runningPlugin) {
+	m.mu.Lock()
+	entry.stopping = true
+	client := entry.client
+	m.mu.Unlock()
+
+	if client != nil {
+		client.stop()
+	}
+	if entry.cancel != nil {
+		entry.cancel()
+	}
+	<-entry.done
+
+	// The supervisor withdraws these on its way out too; doing it here as well
+	// keeps this correct if the entry never had a supervisor to begin with.
+	m.removeEntriesFor(entry.descriptor.Name)
+}
+
+// stopRequested reports whether the supervisor should give up rather than
+// restart: either this plugin was stopped on purpose, or the whole manager is
+// shutting down.
+func (m *Manager) stopRequested(ctx context.Context, entry *runningPlugin) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return entry.stopping
 }
 
 // startPlugin launches one plugin and supervises it.
+//
+// It is idempotent: a plugin that already has a supervisor is left alone, so
+// enabling something twice cannot end up with two processes publishing over
+// each other's entries.
 func (m *Manager) startPlugin(ctx context.Context, descriptor Descriptor) {
-	entry := &runningPlugin{descriptor: descriptor}
+	pluginCtx, cancel := context.WithCancel(ctx)
+	entry := &runningPlugin{
+		descriptor: descriptor,
+		cancel:     cancel,
+		done:       make(chan struct{}),
+	}
 
 	m.mu.Lock()
+	// Two entries do not count as a live supervisor. A failed one has given up
+	// and gone, kept only so the Plugins page can say so, and a stopping one is
+	// on its way out -- replacing either is how a retry happens.
+	if existing, ok := m.running[descriptor.Name]; ok && !existing.failed && !existing.stopping {
+		m.mu.Unlock()
+		cancel()
+		return
+	}
 	m.running[descriptor.Name] = entry
 	m.mu.Unlock()
 
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
-		m.supervise(ctx, entry)
+		defer cancel()
+		// Defers run last-in-first-out, so done closes after retire: anything
+		// waiting on it sees a manager that has already forgotten the plugin.
+		defer close(entry.done)
+		defer m.retire(entry)
+
+		m.supervise(pluginCtx, entry)
 	}()
+}
+
+// retire takes a stopped plugin out of the running set.
+//
+// The supervisor owns this rather than whoever asked it to stop: it is the
+// only thing that knows the plugin is really gone. An entry that failed stays
+// in the map, because "gave up on this one" is something the user should see.
+func (m *Manager) retire(entry *runningPlugin) {
+	m.removeEntriesFor(entry.descriptor.Name)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if entry.failed {
+		return
+	}
+	if current, ok := m.running[entry.descriptor.Name]; ok && current == entry {
+		delete(m.running, entry.descriptor.Name)
+	}
 }
 
 // newClientFor builds a client wired to this manager's callbacks.
@@ -195,10 +320,21 @@ func (m *Manager) newClientFor(entry *runningPlugin) *client {
 	return c
 }
 
+// restartBackoff paces retries.
+//
+// It applies to a plugin that exits immediately after connecting as much as to
+// one that never connects: either way, retrying at once would spend the whole
+// restart budget in milliseconds and tell nobody anything.
+const restartBackoff = 2 * time.Second
+
 // supervise keeps a plugin running, restarting it a bounded number of times.
+//
+// Its caller in startPlugin owns retiring the entry and signalling that it has
+// gone, so every path out of here -- crash, give-up, deliberate stop -- ends
+// the same way.
 func (m *Manager) supervise(ctx context.Context, entry *runningPlugin) {
 	for {
-		if ctx.Err() != nil {
+		if m.stopRequested(ctx, entry) {
 			return
 		}
 
@@ -209,41 +345,38 @@ func (m *Manager) supervise(ctx context.Context, entry *runningPlugin) {
 		m.mu.Unlock()
 
 		if err := client.start(ctx); err != nil {
-			if ctx.Err() != nil {
+			if m.stopRequested(ctx, entry) {
 				return
 			}
 			m.log.Error("plugin failed to start",
 				"plugin", entry.descriptor.Name, "error", err)
+		} else {
+			// Restore the user's saved settings before the plugin publishes
+			// anything, so its first values already reflect them.
+			m.restoreConfig(ctx, entry, client)
 
-			if !m.recordRestart(entry) {
+			// Returns only when the plugin disconnects.
+			client.waitClosed()
+
+			if m.stopRequested(ctx, entry) {
 				return
 			}
-			// Back off before retrying, so a plugin that fails instantly does
-			// not burn a CPU spinning through its restart budget.
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(2 * time.Second):
-			}
-			continue
+
+			m.log.Warn("plugin stopped; restarting", "plugin", entry.descriptor.Name)
+			m.removeEntriesFor(entry.descriptor.Name)
 		}
 
-		// Restore the user's saved settings before the plugin publishes
-		// anything, so its first values already reflect them.
-		m.restoreConfig(ctx, entry)
-
-		// Returns only when the plugin disconnects.
-		client.waitClosed()
-
-		if ctx.Err() != nil {
-			return
-		}
-
-		m.log.Warn("plugin stopped; restarting", "plugin", entry.descriptor.Name)
-		m.removeEntriesFor(entry.descriptor.Name)
-
+		// A plugin that has been up longer than the restart window has no
+		// recent failures left in its history, so recordRestart gives it a full
+		// budget again: a crash after hours of health is a new problem.
 		if !m.recordRestart(entry) {
 			return
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(restartBackoff):
 		}
 	}
 }
@@ -444,14 +577,20 @@ func (m *Manager) Statuses() []Status {
 			EntryCount: counts[descriptor.Name],
 		}
 
-		if entry, ok := m.running[descriptor.Name]; ok && entry.client != nil {
-			info := entry.client.metadata()
-			status.Running = !entry.failed && info.ID != ""
+		if entry, ok := m.running[descriptor.Name]; ok {
+			// Failed is read outside the client check on purpose: a plugin that
+			// was given up on is exactly the one whose client may be gone, and
+			// that is the state most worth reporting.
 			status.Failed = entry.failed
-			status.PluginID = info.ID
-			status.Version = info.Version
-			status.Actions = info.Actions
-			status.Configurable = info.Configurable
+
+			if entry.client != nil {
+				info := entry.client.metadata()
+				status.Running = !entry.failed && !entry.stopping && info.ID != ""
+				status.PluginID = info.ID
+				status.Version = info.Version
+				status.Actions = info.Actions
+				status.Configurable = info.Configurable
+			}
 		}
 		out = append(out, status)
 	}
@@ -517,27 +656,36 @@ func (m *Manager) SetEnabled(pluginName string, enabled bool) error {
 		return err
 	}
 
-	if enabled {
-		for _, descriptor := range m.Discover() {
-			if descriptor.Name == pluginName {
-				if _, running := m.clientFor(pluginName); !running && ctx != nil {
-					m.startPlugin(ctx, descriptor)
-				}
-				return nil
-			}
+	if !enabled {
+		m.stopPlugin(pluginName)
+		return nil
+	}
+
+	for _, descriptor := range m.Discover() {
+		if descriptor.Name != pluginName {
+			continue
 		}
-		return fmt.Errorf("plugin %s was not found", pluginName)
+		if ctx != nil {
+			// startPlugin is idempotent, so enabling something already running
+			// is a no-op rather than a second process.
+			m.startPlugin(ctx, descriptor)
+		}
+		// A nil context means the manager has not been started yet; Start will
+		// pick this plugin up from the enabled state just saved.
+		return nil
 	}
+	return fmt.Errorf("plugin %s was not found", pluginName)
+}
 
-	if client, running := m.clientFor(pluginName); running {
-		client.stop()
-		m.removeEntriesFor(pluginName)
+// stopPlugin shuts a plugin down and stops its supervisor restarting it.
+func (m *Manager) stopPlugin(pluginName string) {
+	m.mu.Lock()
+	entry, ok := m.running[pluginName]
+	m.mu.Unlock()
 
-		m.mu.Lock()
-		delete(m.running, pluginName)
-		m.mu.Unlock()
+	if ok {
+		m.stopEntry(entry)
 	}
-	return nil
 }
 
 func (m *Manager) isEnabled(pluginName string) bool {
@@ -634,9 +782,13 @@ func (m *Manager) persistConfig(ctx context.Context, pluginName string, client *
 }
 
 // restoreConfig replays saved settings into a freshly started plugin.
-func (m *Manager) restoreConfig(ctx context.Context, entry *runningPlugin) {
-	client, ok := m.clientFor(entry.descriptor.Name)
-	if !ok || m.opts.ConfigDir == "" || !client.metadata().Configurable {
+//
+// The client is passed in rather than looked up by name for the same reason
+// newClientFor closes over one: a lookup can return whatever client is
+// registered now, which during a restart is not necessarily the one being
+// started here.
+func (m *Manager) restoreConfig(ctx context.Context, entry *runningPlugin, client *client) {
+	if client == nil || m.opts.ConfigDir == "" || !client.metadata().Configurable {
 		return
 	}
 
