@@ -115,6 +115,7 @@ func New(opts Options) *Monitor {
 		newCPUCollector(),
 		newMemoryCollector(),
 		newNetworkCollector(),
+		newGPUCollector(),
 	}
 	m.slow = []collector{
 		newSystemCollector(),

@@ -8,6 +8,7 @@ require (
 	github.com/getlantern/systray v1.2.2
 	github.com/google/uuid v1.6.0
 	github.com/shirou/gopsutil/v4 v4.26.7
+	github.com/yusufpapurcu/wmi v1.2.4
 	golang.org/x/image v0.45.0
 	golang.org/x/sys v0.47.0
 	gopkg.in/ini.v1 v1.67.3
@@ -29,6 +30,5 @@ require (
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
 	github.com/tklauser/go-sysconf v0.3.16 // indirect
 	github.com/tklauser/numcpus v0.11.0 // indirect
-	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	golang.org/x/text v0.41.0 // indirect
 )
